@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.claude/skills/release/release-step1-get-tag.sh)",
+      "Bash(.claude/skills/release/release-step2-preflight.sh *)",
+      "Bash(.claude/skills/release/release-step3-changes.sh *)",
+      "Bash(.claude/skills/release/release-step4-commit.sh *)",
+      "Bash(./release.sh *)"
+    ]
+  }
+}

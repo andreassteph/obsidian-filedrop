@@ -1,5 +1,37 @@
 # Release Notes
 
+## 0.1.7 — Improve MSG PDF OCR, add requirements installer, and fix Windows PDF compatibility
+
+### Changes
+
+- Fix Windows PDF compatibility by replacing pdf2image/poppler with PyMuPDF for OCR
+- Fix LLM OCR for scanned PDF attachments embedded in MSG files
+- Add "Install Python Requirements" button to settings for one-click dependency setup
+- Improve MSG file detection and surface extract-msg errors more clearly
+
+## 0.1.6 — Add MSG attachment extraction and embedding
+
+### Changes
+
+- Add support for .msg files: extract email body and all attachments, convert each to markdown, and embed them in a single note
+
+## 0.1.5 — Add verified status tracking and multi-LLM gateway with per-drop model selection
+
+### Changes
+
+- Add verified checkbox to file entries so files can be marked as reviewed; syncs state with incoming folder
+- Add incoming folder sync that picks up files dropped outside the plugin and reflects them in the sidebar
+- Add multi-LLM gateway support with a per-drop model selector for choosing the LLM at conversion time
+
+## 0.1.4 — Add multi-provider LLM support and refactor plugin internals
+
+### Changes
+
+- Add LLM provider selector in settings supporting Google Gemini, OpenAI, and custom endpoints for image descriptions
+- Strip reasoning model "thinking" tokens from LLM image descriptions to avoid leaking raw chain-of-thought into notes
+- Include the full filename with extension in generated note names
+- Refactor: extract Python conversion logic into a standalone testable file and split main.ts into focused modules
+
 ## 0.1.3 — Fix file conversion on Windows for paths with spaces
 
 ### Changes

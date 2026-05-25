@@ -1,12 +1,19 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 
-import { DEFAULT_SETTINGS, LLM_PROVIDERS, fetchModels, gatewayUrlIssue } from './settings';
-import { checkMarkitdownCli, checkPythonEnv } from './convert';
+import {
+	DEFAULT_SETTINGS,
+	LlmGateway,
+	LLM_PROVIDERS,
+	fetchModelsForGateway,
+	gatewayUrlIssue,
+	isGatewayEnabled,
+} from './settings';
+import { checkMarkitdownCli, checkPythonEnv, installPythonRequirements, PYTHON_REQUIREMENTS } from './convert';
 import type FileDropPlugin from '../main';
 
 export class FileDropSettingTab extends PluginSettingTab {
 	private plugin: FileDropPlugin;
-	private availableModels: string[] = [];
+	private gatewayModels: Map<string, string[]> = new Map();
 
 	constructor(app: App, plugin: FileDropPlugin) {
 		super(app, plugin);
@@ -60,99 +67,29 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
-		new Setting(containerEl).setName('LLM image processing').setHeading();
+		new Setting(containerEl).setName('LLM gateways').setHeading();
 
-		const provider = LLM_PROVIDERS[this.plugin.settings.llmProvider] ?? LLM_PROVIDERS.custom;
+		this.plugin.settings.llmGateways.forEach((gw, idx) => {
+			this.renderGatewayEntry(containerEl, gw, idx);
+		});
 
 		new Setting(containerEl)
-			.setName('Provider')
-			.setDesc('Where image descriptions are generated. All providers use the OpenAI-compatible API; selecting one prefills the base URL.')
-			.addDropdown((dropdown) => {
-				Object.entries(LLM_PROVIDERS).forEach(([id, { label }]) => dropdown.addOption(id, label));
-				dropdown.setValue(this.plugin.settings.llmProvider);
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.llmProvider = value;
-					if (value !== 'custom') {
-						this.plugin.settings.llmGatewayUrl = LLM_PROVIDERS[value].baseUrl;
-					}
-					// Models are provider-specific — force a re-pull for the new provider.
-					this.plugin.settings.llmModel = '';
-					this.availableModels = [];
+			.setName('Add gateway')
+			.setDesc('Add a new LLM gateway configuration.')
+			.addButton((btn) =>
+				btn.setButtonText('+ Add gateway').onClick(async () => {
+					this.plugin.settings.llmGateways.push({
+						id: crypto.randomUUID(),
+						name: 'New gateway',
+						provider: 'custom',
+						baseUrl: '',
+						apiKey: '',
+						model: '',
+						prompt: '',
+					});
 					await this.plugin.saveSettings();
 					this.display();
-				});
-			});
-
-		new Setting(containerEl)
-			.setName('Base URL')
-			.setDesc('Prefilled by the provider; editable for regional or self-hosted endpoints. https:// required, except for local/LAN hosts.')
-			.addText((text) =>
-				text
-					.setPlaceholder('https://api.openai.com/v1')
-					.setValue(this.plugin.settings.llmGatewayUrl)
-					.onChange(async (value) => {
-						const trimmed = value.trim();
-						this.plugin.settings.llmGatewayUrl = trimmed;
-						await this.plugin.saveSettings();
-						const issue = gatewayUrlIssue(trimmed);
-						if (issue) new Notice(`FileDrop: ${issue}`);
-					})
-			);
-
-		new Setting(containerEl)
-			.setName('API key')
-			.setDesc('Stored unencrypted in this vault’s plugin data. Used only to call your provider.')
-			.addText((text) => {
-				text.inputEl.type = 'password';
-				text
-					.setPlaceholder(provider.keyPlaceholder)
-					.setValue(this.plugin.settings.llmApiKey)
-					.onChange(async (value) => {
-						this.plugin.settings.llmApiKey = value.trim();
-						await this.plugin.saveSettings();
-					});
-			});
-
-		const modelOptions = Array.from(
-			new Set([...this.availableModels, this.plugin.settings.llmModel].filter((m) => m.length > 0))
-		);
-		new Setting(containerEl)
-			.setName('Model')
-			.setDesc('Model used for image descriptions. Refresh to load options from the gateway.')
-			.addDropdown((dropdown) => {
-				if (modelOptions.length === 0) {
-					dropdown.addOption('', 'No models — refresh →');
-					dropdown.setValue('');
-					dropdown.setDisabled(true);
-				} else {
-					modelOptions.forEach((m) => dropdown.addOption(m, m));
-					dropdown.setValue(this.plugin.settings.llmModel);
-				}
-				dropdown.onChange(async (value) => {
-					this.plugin.settings.llmModel = value;
-					await this.plugin.saveSettings();
-				});
-			})
-			.addExtraButton((btn) => {
-				btn.setIcon('refresh-cw')
-					.setTooltip('Refresh model list')
-					.onClick(async () => {
-						this.availableModels = await fetchModels(this.plugin.settings);
-						this.display();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('Image description prompt')
-			.setDesc('Optional. Steers how images are described. Blank uses markitdown’s default.')
-			.addTextArea((text) =>
-				text
-					.setPlaceholder('Describe this image in detail.')
-					.setValue(this.plugin.settings.llmPrompt)
-					.onChange(async (value) => {
-						this.plugin.settings.llmPrompt = value;
-						await this.plugin.saveSettings();
-					})
+				})
 			);
 
 		new Setting(containerEl)
@@ -208,18 +145,185 @@ export class FileDropSettingTab extends PluginSettingTab {
 			})
 		);
 
-		// Auto-populate models on first open when credentials are present.
-		if (
-			this.availableModels.length === 0 &&
-			this.plugin.settings.llmGatewayUrl &&
-			this.plugin.settings.llmApiKey
-		) {
-			fetchModels(this.plugin.settings).then((models) => {
-				if (models.length > 0) {
-					this.availableModels = models;
-					this.display();
-				}
+		new Setting(containerEl).setName('Install Python requirements').setHeading();
+
+		new Setting(containerEl)
+			.setName('Required packages')
+			.setDesc(
+				`Installs ${PYTHON_REQUIREMENTS.join(', ')} into the configured Python environment ` +
+				'via "python -m pip install". Use this to set up or repair the environment without leaving Obsidian.'
+			)
+			.addButton((btn) => {
+				const outputEl = containerEl.createEl('pre', { cls: 'filedrop-pip-output' });
+				outputEl.hide();
+
+				btn.setButtonText('Install packages').onClick(() => {
+					outputEl.show();
+					outputEl.setText('');
+					btn.setDisabled(true);
+					btn.setButtonText('Installing…');
+
+					installPythonRequirements(
+						this.plugin.settings.pythonCommand,
+						(chunk) => {
+							outputEl.textContent += chunk;
+							outputEl.scrollTop = outputEl.scrollHeight;
+						},
+						(ok) => {
+							btn.setDisabled(false);
+							btn.setButtonText('Install packages');
+							outputEl.textContent += ok
+								? '\n✓ Done.'
+								: '\n✗ pip exited with an error — see output above.';
+							new Notice(
+								ok
+									? 'FileDrop: Python packages installed successfully.'
+									: 'FileDrop: pip install failed — check settings for details.'
+							);
+						}
+					);
+				});
 			});
-		}
+
+		// Auto-populate models for gateways with credentials but no cached models yet
+		this.plugin.settings.llmGateways.forEach((gw) => {
+			if (!this.gatewayModels.has(gw.id) && gw.baseUrl && gw.apiKey) {
+				fetchModelsForGateway(gw).then((models) => {
+					if (models.length > 0) {
+						this.gatewayModels.set(gw.id, models);
+						this.display();
+					}
+				});
+			}
+		});
+	}
+
+	private renderGatewayEntry(containerEl: HTMLElement, gw: LlmGateway, idx: number): void {
+		const wrapperEl = containerEl.createDiv({ cls: 'filedrop-gateway-entry' });
+
+		// Name field + remove button
+		new Setting(wrapperEl)
+			.setName(`Gateway ${idx + 1}`)
+			.addText((text) =>
+				text
+					.setPlaceholder('My gateway')
+					.setValue(gw.name)
+					.onChange(async (value) => {
+						this.plugin.settings.llmGateways[idx].name = value.trim();
+						await this.plugin.saveSettings();
+						this.plugin.getActiveView()?.refreshModelSelector();
+					})
+			)
+			.addButton((btn) =>
+				btn
+					.setIcon('trash')
+					.setTooltip('Remove gateway')
+					.onClick(async () => {
+						this.plugin.settings.llmGateways.splice(idx, 1);
+						this.gatewayModels.delete(gw.id);
+						await this.plugin.saveSettings();
+						this.plugin.getActiveView()?.refreshModelSelector();
+						this.display();
+					})
+			);
+
+		// Provider dropdown
+		new Setting(wrapperEl)
+			.setName('Provider')
+			.addDropdown((dd) => {
+				Object.entries(LLM_PROVIDERS).forEach(([id, { label }]) => dd.addOption(id, label));
+				dd.setValue(gw.provider);
+				dd.onChange(async (value) => {
+					this.plugin.settings.llmGateways[idx].provider = value;
+					if (value !== 'custom') {
+						this.plugin.settings.llmGateways[idx].baseUrl = LLM_PROVIDERS[value].baseUrl;
+					}
+					this.plugin.settings.llmGateways[idx].model = '';
+					this.gatewayModels.delete(gw.id);
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			});
+
+		// Base URL
+		new Setting(wrapperEl)
+			.setName('Base URL')
+			.setDesc('https:// required, except for local/LAN hosts.')
+			.addText((text) =>
+				text
+					.setPlaceholder('https://api.openai.com/v1')
+					.setValue(gw.baseUrl)
+					.onChange(async (value) => {
+						const trimmed = value.trim();
+						this.plugin.settings.llmGateways[idx].baseUrl = trimmed;
+						await this.plugin.saveSettings();
+						const issue = gatewayUrlIssue(trimmed);
+						if (issue) new Notice(`FileDrop: ${issue}`);
+					})
+			);
+
+		// API key
+		const providerDef = LLM_PROVIDERS[gw.provider] ?? LLM_PROVIDERS.custom;
+		new Setting(wrapperEl)
+			.setName('API key')
+			.setDesc('Stored unencrypted in this vault\'s plugin data.')
+			.addText((text) => {
+				text.inputEl.type = 'password';
+				text
+					.setPlaceholder(providerDef.keyPlaceholder)
+					.setValue(gw.apiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.llmGateways[idx].apiKey = value.trim();
+						await this.plugin.saveSettings();
+						this.plugin.getActiveView()?.refreshModelSelector();
+					});
+			});
+
+		// Model dropdown + refresh button
+		const cachedModels = this.gatewayModels.get(gw.id) ?? [];
+		const modelOptions = Array.from(
+			new Set([...cachedModels, gw.model].filter((m) => m.length > 0))
+		);
+		new Setting(wrapperEl)
+			.setName('Model')
+			.addDropdown((dd) => {
+				if (modelOptions.length === 0) {
+					dd.addOption('', 'No models — refresh →');
+					dd.setValue('');
+					dd.setDisabled(true);
+				} else {
+					modelOptions.forEach((m) => dd.addOption(m, m));
+					dd.setValue(gw.model);
+				}
+				dd.onChange(async (value) => {
+					this.plugin.settings.llmGateways[idx].model = value;
+					await this.plugin.saveSettings();
+					this.plugin.getActiveView()?.refreshModelSelector();
+				});
+			})
+			.addExtraButton((btn) =>
+				btn
+					.setIcon('refresh-cw')
+					.setTooltip('Refresh model list')
+					.onClick(async () => {
+						const models = await fetchModelsForGateway(gw);
+						this.gatewayModels.set(gw.id, models);
+						this.display();
+					})
+			);
+
+		// Prompt
+		new Setting(wrapperEl)
+			.setName('Image description prompt')
+			.setDesc('Optional. Steers how images are described. Blank uses markitdown\'s default.')
+			.addTextArea((text) =>
+				text
+					.setPlaceholder('Describe this image in detail.')
+					.setValue(gw.prompt)
+					.onChange(async (value) => {
+						this.plugin.settings.llmGateways[idx].prompt = value;
+						await this.plugin.saveSettings();
+					})
+			);
 	}
 }

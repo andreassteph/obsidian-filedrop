@@ -3,16 +3,28 @@ import { Notice, requestUrl } from 'obsidian';
 export const VIEW_TYPE = 'filedrop-sidebar';
 export const MAX_RECENT_FILES = 50;
 
+export interface LlmGateway {
+	id: string;
+	name: string;
+	provider: string;
+	baseUrl: string;
+	apiKey: string;
+	model: string;
+	prompt: string;
+}
+
 export interface FileDropSettings {
 	incomingDir: string;
 	categories: string[];
 	defaultTags: string[];
-	llmProvider: string;
-	llmGatewayUrl: string;
-	llmApiKey: string;
-	llmModel: string;
-	llmPrompt: string;
+	llmGateways: LlmGateway[];
 	pythonCommand: string;
+	// Legacy fields — read on first load for migration only
+	llmProvider?: string;
+	llmGatewayUrl?: string;
+	llmApiKey?: string;
+	llmModel?: string;
+	llmPrompt?: string;
 }
 
 export interface ProviderDefault {
@@ -36,6 +48,7 @@ export interface DroppedFile {
 	tags: string[];
 	category: string;
 	droppedAt: number;
+	verified?: boolean;
 }
 
 export interface PluginData {
@@ -47,16 +60,28 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
-	llmProvider: 'custom',
-	llmGatewayUrl: '',
-	llmApiKey: '',
-	llmModel: '',
-	llmPrompt: '',
+	llmGateways: [],
 	pythonCommand: 'python3',
 };
 
-export function isLlmEnabled(settings: FileDropSettings): boolean {
-	return settings.llmApiKey.length > 0 && settings.llmModel.length > 0;
+export function isGatewayEnabled(gw: LlmGateway): boolean {
+	return gw.apiKey.length > 0 && gw.model.length > 0;
+}
+
+export function migrateLegacyLlmFields(data: Partial<FileDropSettings>): LlmGateway[] {
+	const gateways: LlmGateway[] = data.llmGateways ?? [];
+	if (gateways.length === 0 && data.llmApiKey && data.llmApiKey.length > 0) {
+		return [{
+			id: crypto.randomUUID(),
+			name: 'Default',
+			provider: data.llmProvider ?? 'custom',
+			baseUrl: data.llmGatewayUrl ?? '',
+			apiKey: data.llmApiKey,
+			model: data.llmModel ?? '',
+			prompt: data.llmPrompt ?? '',
+		}];
+	}
+	return gateways;
 }
 
 // True for loopback, RFC 1918 private ranges, link-local, and mDNS/.localhost
@@ -111,28 +136,28 @@ export function isGatewayUrlSecure(url: string): boolean {
 	return gatewayUrlIssue(url) === null;
 }
 
-export async function fetchModels(settings: FileDropSettings): Promise<string[]> {
-	if (!settings.llmGatewayUrl || !settings.llmApiKey) {
+export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
+	if (!gw.baseUrl || !gw.apiKey) {
 		new Notice('FileDrop: set the gateway URL and API key before refreshing models.');
 		return [];
 	}
-	const issue = gatewayUrlIssue(settings.llmGatewayUrl);
+	const issue = gatewayUrlIssue(gw.baseUrl);
 	if (issue) {
 		new Notice(`FileDrop: ${issue}`);
 		return [];
 	}
-	const modelsUrl = `${settings.llmGatewayUrl.replace(/\/+$/, '')}/models`;
+	const modelsUrl = `${gw.baseUrl.replace(/\/+$/, '')}/models`;
 	try {
 		const res = await requestUrl({
 			url: modelsUrl,
-			headers: { Authorization: `Bearer ${settings.llmApiKey}` },
+			headers: { Authorization: `Bearer ${gw.apiKey}` },
 		});
 		const data = (res.json?.data ?? []) as { id?: string }[];
 		return data
 			.map((m) => m.id)
 			.filter((id): id is string => typeof id === 'string')
 			.sort();
-	} catch (err) {
+	} catch {
 		new Notice('FileDrop: could not fetch models from the gateway.');
 		return [];
 	}

@@ -1,3 +1,5 @@
 # Runtime packages the plugin expects in the user's Python environment.
 markitdown
 openai
+extract-msg
+pymupdf

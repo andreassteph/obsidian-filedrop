@@ -1,13 +1,17 @@
 import { Notice } from 'obsidian';
 
 import convertScript from '../python/filedrop_convert.py';
-import { FileDropSettings, isGatewayUrlSecure, isLlmEnabled } from './settings';
+import msgScript from '../python/filedrop_msg.py';
+import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { execFile } = require('child_process') as typeof import('child_process');
+const { execFile, spawn } = require('child_process') as typeof import('child_process');
 
 const MARKITDOWN_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
+// MSG conversion runs body + every attachment through the LLM sequentially,
+// so scanned PDFs with many pages need a much larger budget.
+const MSG_LLM_TIMEOUT_MS = 600_000;
 
 // The binary/executable family markitdown reports as unsupported.
 const EXECUTABLE_EXTS = new Set([
@@ -36,19 +40,19 @@ function unsupportedFormatDetail(message: string): string | null {
 
 // Executables carry no extractable text, so ask the LLM what the file most
 // likely is from its name. The reply is an educated guess, flagged as such.
-function describeExecutable(absolutePath: string, settings: FileDropSettings): Promise<string> {
+function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
 	return new Promise((resolve) => {
 		execFile(
-			settings.pythonCommand,
+			pythonCommand,
 			['-c', convertScript, absolutePath],
 			{
 				timeout: LLM_TIMEOUT_MS,
 				env: {
 					...process.env,
 					FILEDROP_DESCRIBE: '1',
-					FILEDROP_LLM_URL: settings.llmGatewayUrl,
-					FILEDROP_LLM_KEY: settings.llmApiKey,
-					FILEDROP_LLM_MODEL: settings.llmModel,
+					FILEDROP_LLM_URL: gateway?.baseUrl,
+					FILEDROP_LLM_KEY: gateway?.apiKey,
+					FILEDROP_LLM_MODEL: gateway?.model,
 				},
 			},
 			(error: Error | null, stdout: string) => {
@@ -68,22 +72,26 @@ function describeExecutable(absolutePath: string, settings: FileDropSettings): P
 	});
 }
 
-export async function runMarkitdown(absolutePath: string, settings: FileDropSettings): Promise<string> {
-	if (isLlmEnabled(settings) && !isGatewayUrlSecure(settings.llmGatewayUrl)) {
+export async function runMarkitdown(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null
+): Promise<string> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
-	} else if (isLlmEnabled(settings)) {
+	} else if (gateway && isGatewayEnabled(gateway)) {
 		return new Promise((resolve) => {
 			execFile(
-				settings.pythonCommand,
+				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
 					timeout: LLM_TIMEOUT_MS,
 					env: {
 						...process.env,
-						FILEDROP_LLM_URL: settings.llmGatewayUrl,
-						FILEDROP_LLM_KEY: settings.llmApiKey,
-						FILEDROP_LLM_MODEL: settings.llmModel,
-						FILEDROP_LLM_PROMPT: settings.llmPrompt,
+						FILEDROP_LLM_URL: gateway.baseUrl,
+						FILEDROP_LLM_KEY: gateway.apiKey,
+						FILEDROP_LLM_MODEL: gateway.model,
+						FILEDROP_LLM_PROMPT: gateway.prompt,
 					},
 				},
 				(error: Error | null, stdout: string) => {
@@ -91,7 +99,7 @@ export async function runMarkitdown(absolutePath: string, settings: FileDropSett
 						const unsupported = unsupportedFormatDetail(error.message);
 						if (unsupported) {
 							if (isExecutableFile(absolutePath)) {
-								describeExecutable(absolutePath, settings).then(resolve);
+								describeExecutable(absolutePath, pythonCommand, gateway).then(resolve);
 								return;
 							}
 							new Notice('FileDrop: file type not supported by markitdown.');
@@ -162,6 +170,98 @@ export async function checkMarkitdownCli(): Promise<PythonCheckResult> {
 	};
 }
 
+export interface MsgAttachment {
+	filename: string;
+	dataB64: string;
+	markdown: string;
+}
+
+export interface MsgConversionResult {
+	body: string;
+	attachments: MsgAttachment[];
+}
+
+export async function runMsgConversion(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null
+): Promise<MsgConversionResult> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
+	}
+	const useGateway = gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
+	const timeout = useGateway ? MSG_LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	if (useGateway && gateway) {
+		env.FILEDROP_LLM_URL = gateway.baseUrl;
+		env.FILEDROP_LLM_KEY = gateway.apiKey;
+		env.FILEDROP_LLM_MODEL = gateway.model;
+		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+	}
+
+	return new Promise((resolve) => {
+		execFile(
+			pythonCommand,
+			['-c', msgScript, absolutePath],
+			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
+			(error: Error | null, stdout: string) => {
+				if (error) {
+					new Notice('FileDrop: MSG extraction failed — see note body for details.');
+					resolve({
+						body: conversionErrorBody('MSG extraction failed', error.message),
+						attachments: [],
+					});
+					return;
+				}
+				try {
+					const parsed = JSON.parse(stdout) as {
+						body: string;
+						attachments: Array<{ filename: string; data_b64: string; markdown: string }>;
+						warning?: string | null;
+					};
+					if (parsed.warning) {
+						new Notice(`FileDrop MSG: ${parsed.warning}`);
+					}
+					resolve({
+						body: parsed.body ?? '',
+						attachments: (parsed.attachments ?? []).map((a) => ({
+							filename: a.filename,
+							dataB64: a.data_b64,
+							markdown: a.markdown,
+						})),
+					});
+				} catch (e) {
+					resolve({
+						body: conversionErrorBody('MSG parse error', String(e)),
+						attachments: [],
+					});
+				}
+			}
+		);
+	});
+}
+
+export const PYTHON_REQUIREMENTS = ['markitdown', 'openai', 'extract-msg', 'pymupdf'];
+
+export function installPythonRequirements(
+	pythonCommand: string,
+	onData: (chunk: string) => void,
+	onDone: (ok: boolean) => void
+): void {
+	let child: ReturnType<typeof spawn>;
+	try {
+		child = spawn(pythonCommand, ['-m', 'pip', 'install', ...PYTHON_REQUIREMENTS]);
+	} catch (err) {
+		onData(String(err));
+		onDone(false);
+		return;
+	}
+	child.stdout?.on('data', (data: Buffer) => onData(data.toString()));
+	child.stderr?.on('data', (data: Buffer) => onData(data.toString()));
+	child.on('close', (code: number | null) => onDone(code === 0));
+	child.on('error', (err: Error) => { onData(err.message + '\n'); onDone(false); });
+}
+
 export async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResult[]> {
 	const results: PythonCheckResult[] = [];
 
@@ -179,6 +279,12 @@ export async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResu
 
 	const openaiCheck = await runPythonCheck(pythonCmd, ['-c', 'import openai; print("ok")']);
 	results.push({ label: 'openai package', ok: openaiCheck.ok, detail: openaiCheck.ok ? undefined : openaiCheck.detail });
+
+	const extractMsgCheck = await runPythonCheck(pythonCmd, ['-c', 'import extract_msg; print("ok")']);
+	results.push({ label: 'extract-msg package', ok: extractMsgCheck.ok, detail: extractMsgCheck.ok ? undefined : extractMsgCheck.detail });
+
+	const pymupdfCheck = await runPythonCheck(pythonCmd, ['-c', 'import fitz; print("ok")']);
+	results.push({ label: 'pymupdf package', ok: pymupdfCheck.ok, detail: pymupdfCheck.ok ? undefined : pymupdfCheck.detail });
 
 	return results;
 }

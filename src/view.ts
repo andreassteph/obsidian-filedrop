@@ -1,12 +1,14 @@
 import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, VIEW_TYPE } from './settings';
+import { DroppedFile, VIEW_TYPE, isGatewayEnabled } from './settings';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
 	private plugin: FileDropPlugin;
 	private fileListEl: HTMLElement | null = null;
 	private selectedCategory: string;
+	private selectedGatewayId: string | null = null;
+	private modelSelectEl: HTMLSelectElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
 		super(leaf);
@@ -35,6 +37,15 @@ export class FileDropView extends ItemView {
 			this.selectedCategory = categorySelect.value;
 		});
 
+		// Model / gateway selector
+		const modelRow = container.createDiv({ cls: 'filedrop-category-row' });
+		modelRow.createEl('label', { cls: 'filedrop-category-label', text: 'Model' });
+		this.modelSelectEl = modelRow.createEl('select', { cls: 'filedrop-category-select' });
+		this.populateModelSelect(this.modelSelectEl);
+		this.modelSelectEl.addEventListener('change', () => {
+			this.selectedGatewayId = this.modelSelectEl!.value || null;
+		});
+
 		// Drop zone
 		const dropZone = container.createDiv({ cls: 'filedrop-zone' });
 		dropZone.createDiv({ cls: 'filedrop-icon' });
@@ -61,7 +72,7 @@ export class FileDropView extends ItemView {
 			const files = e.dataTransfer?.files;
 			if (!files || files.length === 0) return;
 			for (const file of Array.from(files)) {
-				await this.plugin.processDroppedFile(file, this.selectedCategory);
+				await this.plugin.processDroppedFile(file, this.selectedCategory, this.selectedGatewayId);
 			}
 		});
 
@@ -74,19 +85,42 @@ export class FileDropView extends ItemView {
 		// nothing to clean up
 	}
 
+	private populateModelSelect(el: HTMLSelectElement): void {
+		el.empty();
+		const noneOpt = el.createEl('option', { value: '', text: '— None —' });
+		noneOpt.selected = !this.selectedGatewayId;
+		this.plugin.settings.llmGateways
+			.filter((gw) => isGatewayEnabled(gw))
+			.forEach((gw) => {
+				const opt = el.createEl('option', { value: gw.id, text: `${gw.name} (${gw.model})` });
+				opt.selected = gw.id === this.selectedGatewayId;
+			});
+	}
+
+	refreshModelSelector(): void {
+		if (!this.modelSelectEl) return;
+		if (!this.plugin.settings.llmGateways.some((g) => g.id === this.selectedGatewayId)) {
+			this.selectedGatewayId = null;
+		}
+		this.populateModelSelect(this.modelSelectEl);
+	}
+
 	renderFileList(): void {
 		if (!this.fileListEl) return;
 		this.fileListEl.empty();
 
-		const entries = this.plugin.recentFiles;
-		if (entries.length === 0) {
+		const unverified = this.plugin.recentFiles
+			.map((entry, index) => ({ entry, index }))
+			.filter(({ entry }) => !entry.verified);
+
+		if (unverified.length === 0) {
 			this.fileListEl.createEl('p', { cls: 'filedrop-empty', text: 'No files yet.' });
 			return;
 		}
 
 		// Group entries by parent folder (everything before the last /)
 		const groups = new Map<string, { entry: DroppedFile; index: number }[]>();
-		entries.forEach((entry, index) => {
+		unverified.forEach(({ entry, index }) => {
 			const lastSlash = entry.filePath.lastIndexOf('/');
 			const folder = lastSlash >= 0 ? entry.filePath.slice(0, lastSlash) : '';
 			if (!groups.has(folder)) groups.set(folder, []);
@@ -110,8 +144,31 @@ export class FileDropView extends ItemView {
 		nameEl.addEventListener('click', () => {
 			this.app.workspace.openLinkText(entry.notePath, '', false);
 		});
+
+		const verifiedLabel = headerRow.createEl('label', { cls: 'filedrop-verified-label' });
+		const verifiedCheckbox = verifiedLabel.createEl('input', { cls: 'filedrop-verified-checkbox' });
+		verifiedCheckbox.type = 'checkbox';
+		verifiedCheckbox.checked = false;
+		verifiedLabel.appendText('verified');
+		verifiedCheckbox.addEventListener('change', async () => {
+			if (verifiedCheckbox.checked) await this.markVerified(index);
+		});
+
 		const removeBtn = headerRow.createEl('button', { cls: 'filedrop-entry-remove', text: '×' });
 		removeBtn.addEventListener('click', () => this.removeEntry(index));
+
+		const rerunBtn = headerRow.createEl('button', { cls: 'filedrop-entry-rerun', text: '↺' });
+		rerunBtn.title = 'Re-run conversion';
+		rerunBtn.addEventListener('click', async () => {
+			rerunBtn.disabled = true;
+			rerunBtn.setText('…');
+			try {
+				await this.plugin.rerunConversion(entry, this.selectedGatewayId);
+			} finally {
+				rerunBtn.disabled = false;
+				rerunBtn.setText('↺');
+			}
+		});
 
 		const tagsRow = entryEl.createDiv({ cls: 'filedrop-entry-tags' });
 		entry.tags.forEach((tag, tagIndex) => {
@@ -154,11 +211,26 @@ export class FileDropView extends ItemView {
 		this.renderFileList();
 	}
 
+	private async markVerified(index: number): Promise<void> {
+		this.plugin.recentFiles[index].verified = true;
+		await this.plugin.saveSettings();
+		await this.rewriteNoteVerified(this.plugin.recentFiles[index].notePath);
+		this.renderFileList();
+	}
+
 	private async rewriteNoteTags(notePath: string, tags: string[]): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(notePath);
 		if (!(file instanceof TFile)) return;
 		const content = await this.app.vault.read(file);
 		const updated = content.replace(/^tags:.*$/m, `tags: ${JSON.stringify(tags)}`);
+		await this.app.vault.modify(file, updated);
+	}
+
+	private async rewriteNoteVerified(notePath: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		if (!(file instanceof TFile)) return;
+		const content = await this.app.vault.read(file);
+		const updated = content.replace(/^verified:.*$/m, 'verified: true');
 		await this.app.vault.modify(file, updated);
 	}
 }
