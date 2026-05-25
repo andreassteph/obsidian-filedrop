@@ -137,7 +137,14 @@ export async function runMsgConversion(
 					return;
 				}
 				try {
-					const parsed = JSON.parse(stdout) as { body: string; attachments: Array<{ filename: string; data_b64: string; markdown: string }> };
+					const parsed = JSON.parse(stdout) as {
+						body: string;
+						attachments: Array<{ filename: string; data_b64: string; markdown: string }>;
+						warning?: string | null;
+					};
+					if (parsed.warning) {
+						new Notice(`FileDrop MSG: ${parsed.warning}`);
+					}
 					resolve({
 						body: parsed.body ?? '',
 						attachments: (parsed.attachments ?? []).map((a) => ({

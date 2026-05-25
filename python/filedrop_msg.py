@@ -51,8 +51,18 @@ def convert_msg(path, env):
     body = _safe_convert(md, path)
 
     attachments = []
+    warning = None
+
     try:
         import extract_msg  # type: ignore
+    except ImportError:
+        warning = (
+            "extract-msg is not installed — attachment extraction skipped. "
+            "Run: pip install extract-msg"
+        )
+        return {"body": body, "attachments": attachments, "warning": warning}
+
+    try:
         msg = extract_msg.Message(path)
         with tempfile.TemporaryDirectory() as tmpdir:
             for att in msg.attachments or []:
@@ -74,12 +84,10 @@ def convert_msg(path, env):
                     "data_b64": base64.b64encode(data).decode("ascii"),
                     "markdown": att_md,
                 })
-    except ImportError:
-        pass
-    except Exception:
-        pass
+    except Exception as exc:
+        warning = f"Attachment extraction failed: {exc}"
 
-    return {"body": body, "attachments": attachments}
+    return {"body": body, "attachments": attachments, "warning": warning}
 
 
 def main(argv=None, env=None):
