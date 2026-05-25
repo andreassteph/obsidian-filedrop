@@ -1,5 +1,16 @@
 # Release Notes
 
+## 0.1.8 — Scanned PDF OCR, executable handling, and UX improvements
+
+### Changes
+
+- Add LLM-powered OCR for scanned PDFs (both dropped directly and as MSG attachments) using PyMuPDF for page rendering
+- Handle unsupported file formats gracefully — show a clean error callout instead of a raw Python traceback; for executables, ask the LLM to describe the file from its name
+- Add "Install Python Requirements" button in settings to install all dependencies in one click
+- Add rerun button on file entries to re-run markitdown conversion on demand
+- Fix MSG file detection to cover more file types and surface extract-msg errors clearly
+- Replace pdf2image/poppler with PyMuPDF for cross-platform compatibility (Windows support)
+
 ## 0.1.7 — Improve MSG PDF OCR, add requirements installer, and fix Windows PDF compatibility
 
 ### Changes
