@@ -9,7 +9,7 @@ import {
 	VIEW_TYPE,
 	migrateLegacyLlmFields,
 } from './src/settings';
-import { runMarkitdown } from './src/convert';
+import { runMarkitdown, runMsgConversion } from './src/convert';
 import { getMonthSlug } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
@@ -79,7 +79,38 @@ export default class FileDropPlugin extends Plugin {
 		const gateway = gatewayId
 			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
 			: null;
-		const markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+
+		const isMsgFile = file.name.toLowerCase().endsWith('.msg');
+		let markdownBody: string;
+		const attachmentFrontmatterLines: string[] = [];
+
+		if (isMsgFile) {
+			const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+
+			if (msgResult.attachments.length > 0) {
+				const attDirName = `${file.name}.attachments`;
+				const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
+				await this.ensureDir(attDirPath);
+
+				for (const att of msgResult.attachments) {
+					const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
+					const attBuf = Buffer.from(att.dataB64, 'base64');
+					const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+					await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
+					attachmentFrontmatterLines.push(`  - "[[${monthSlug}/${category}/${attDirName}/${att.filename}]]"`);
+				}
+			}
+
+			const bodyParts: string[] = [msgResult.body];
+			for (const att of msgResult.attachments) {
+				if (att.markdown) {
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+				}
+			}
+			markdownBody = bodyParts.join('\n\n');
+		} else {
+			markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+		}
 
 		// Find a unique note path for duplicate drops
 		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
@@ -92,16 +123,20 @@ export default class FileDropPlugin extends Plugin {
 			notePath = normalizePath(`${subfolderPath}/${file.name}-${i}.md`);
 		}
 
-		const noteContent = [
+		const frontmatterLines = [
 			'---',
 			`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
 			'processed: false',
 			'verified: false',
 			`tags: ${JSON.stringify(this.settings.defaultTags)}`,
-			'---',
-			'',
-			markdownBody,
-		].join('\n');
+		];
+		if (attachmentFrontmatterLines.length > 0) {
+			frontmatterLines.push('attachments:');
+			frontmatterLines.push(...attachmentFrontmatterLines);
+		}
+		frontmatterLines.push('---', '', markdownBody);
+
+		const noteContent = frontmatterLines.join('\n');
 		await vault.create(notePath, noteContent);
 
 		const entry: DroppedFile = {

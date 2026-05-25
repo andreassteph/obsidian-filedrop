@@ -1,6 +1,7 @@
 import { Notice } from 'obsidian';
 
 import convertScript from '../python/filedrop_convert.py';
+import msgScript from '../python/filedrop_msg.py';
 import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -93,6 +94,67 @@ export async function checkMarkitdownCli(): Promise<PythonCheckResult> {
 		ok: result.ok,
 		detail: result.ok ? result.stdout : result.detail,
 	};
+}
+
+export interface MsgAttachment {
+	filename: string;
+	dataB64: string;
+	markdown: string;
+}
+
+export interface MsgConversionResult {
+	body: string;
+	attachments: MsgAttachment[];
+}
+
+export async function runMsgConversion(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null
+): Promise<MsgConversionResult> {
+	const useGateway = gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
+	const timeout = useGateway ? LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
+	const env: NodeJS.ProcessEnv = { ...process.env };
+	if (useGateway && gateway) {
+		env.FILEDROP_LLM_URL = gateway.baseUrl;
+		env.FILEDROP_LLM_KEY = gateway.apiKey;
+		env.FILEDROP_LLM_MODEL = gateway.model;
+		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+	}
+
+	return new Promise((resolve) => {
+		execFile(
+			pythonCommand,
+			['-c', msgScript, absolutePath],
+			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
+			(error: Error | null, stdout: string) => {
+				if (error) {
+					new Notice('FileDrop: MSG extraction failed — see note body for details.');
+					resolve({
+						body: conversionErrorBody('MSG extraction failed', error.message),
+						attachments: [],
+					});
+					return;
+				}
+				try {
+					const parsed = JSON.parse(stdout) as { body: string; attachments: Array<{ filename: string; data_b64: string; markdown: string }> };
+					resolve({
+						body: parsed.body ?? '',
+						attachments: (parsed.attachments ?? []).map((a) => ({
+							filename: a.filename,
+							dataB64: a.data_b64,
+							markdown: a.markdown,
+						})),
+					});
+				} catch (e) {
+					resolve({
+						body: conversionErrorBody('MSG parse error', String(e)),
+						attachments: [],
+					});
+				}
+			}
+		);
+	});
 }
 
 export async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResult[]> {
