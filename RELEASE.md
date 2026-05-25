@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.9 — Improve PDF conversion with markitdown-first strategy
+
+### Changes
+
+- Try markitdown with LLM support first for PDFs (handles text-layer and embedded images); fall back to PyMuPDF page-by-page OCR only for scanned/image-only PDFs
+
 ## 0.1.8 — Scanned PDF OCR, executable handling, and UX improvements
 
 ### Changes
