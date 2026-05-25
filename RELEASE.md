@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.2 — Add markitdown check button to settings
+
+### Changes
+
+- Add "Check markitdown" button in settings to verify the markitdown installation and display version info inline
+
 ## 0.1.1 — Add Python environment check to settings
 
 ### Changes
