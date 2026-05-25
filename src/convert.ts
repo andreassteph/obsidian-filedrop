@@ -9,6 +9,9 @@ const { execFile, spawn } = require('child_process') as typeof import('child_pro
 
 const MARKITDOWN_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
+// MSG conversion runs body + every attachment through the LLM sequentially,
+// so scanned PDFs with many pages need a much larger budget.
+const MSG_LLM_TIMEOUT_MS = 600_000;
 
 function conversionErrorBody(title: string, detail: string): string {
 	return `> [!error] Conversion error: ${title}\n> ${detail.replace(/\n/g, '\n> ')}`;
@@ -112,8 +115,11 @@ export async function runMsgConversion(
 	pythonCommand: string,
 	gateway: LlmGateway | null
 ): Promise<MsgConversionResult> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
+	}
 	const useGateway = gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
-	const timeout = useGateway ? LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
+	const timeout = useGateway ? MSG_LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	if (useGateway && gateway) {
 		env.FILEDROP_LLM_URL = gateway.baseUrl;

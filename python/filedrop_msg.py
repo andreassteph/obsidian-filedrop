@@ -17,8 +17,43 @@ filedrop_convert.py).  Called as: python -c <inlined-source> <msg_path>
 import base64
 import json
 import os
+import re
 import sys
 import tempfile
+
+# Strip chain-of-thought blocks that reasoning models emit before their answer.
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_DANGLING_CLOSERS = ("</think>", "</thinking>", "</reasoning>")
+
+
+def _strip_thinking(text):
+    if not text:
+        return text
+    cleaned = _THINK_BLOCK.sub("", text)
+    lowered = cleaned.lower()
+    for closer in _DANGLING_CLOSERS:
+        idx = lowered.rfind(closer)
+        if idx != -1:
+            cleaned = cleaned[idx + len(closer):]
+            break
+    return cleaned.strip()
+
+
+def _install_thinking_filter(client):
+    completions = client.chat.completions
+    original_create = completions.create
+
+    def create(*args, **kwargs):
+        response = original_create(*args, **kwargs)
+        for choice in getattr(response, "choices", None) or []:
+            message = getattr(choice, "message", None)
+            content = getattr(message, "content", None)
+            if message is not None and content:
+                message.content = _strip_thinking(content)
+        return response
+
+    completions.create = create
+    return client
 
 
 def _build_markitdown(env):
@@ -28,7 +63,7 @@ def _build_markitdown(env):
     if url and key and model:
         from openai import OpenAI
         from markitdown import MarkItDown
-        client = OpenAI(api_key=key, base_url=url or None)
+        client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None))
         kwargs = {"llm_client": client, "llm_model": model}
         prompt = env.get("FILEDROP_LLM_PROMPT")
         if prompt:
