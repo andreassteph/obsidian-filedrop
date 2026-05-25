@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.10 — Fix UTF-8 encoding for Windows compatibility
+
+### Changes
+
+- Force UTF-8 output on all Python subprocesses to prevent encoding errors on Windows
+- Fix ASCII encoding errors in message conversion
+
 ## 0.1.9 — Improve PDF conversion with markitdown-first strategy
 
 ### Changes
