@@ -69,7 +69,71 @@ def build_converter(env):
 
 
 def convert(path, env):
+    # Scanned PDFs have no text layer — pdfminer returns nothing.
+    # Render each page via PyMuPDF and send to the LLM instead.
+    if path.lower().endswith(".pdf"):
+        result = _convert_pdf_pages_with_llm(path, env)
+        if result:
+            return result
     return build_converter(env).convert(path).text_content
+
+
+def _convert_pdf_pages_with_llm(path, env):
+    """Render every PDF page via PyMuPDF and OCR with the LLM.
+
+    Returns combined markdown, or empty string if PyMuPDF is unavailable
+    so the caller falls back to plain markitdown text extraction.
+    """
+    import base64
+
+    try:
+        import fitz  # pymupdf  # type: ignore
+    except ImportError:
+        return ""
+
+    client = OpenAI(
+        api_key=env["FILEDROP_LLM_KEY"],
+        base_url=env.get("FILEDROP_LLM_URL") or None,
+    )
+    _install_thinking_filter(client)
+
+    prompt = (
+        env.get("FILEDROP_LLM_PROMPT")
+        or "Transcribe all text visible on this page exactly as it appears. "
+           "For any charts, tables, or images also provide a concise description."
+    )
+
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return ""
+
+    if not doc.page_count:
+        return ""
+
+    pages = []
+    mat = fitz.Matrix(2, 2)  # 2× zoom for better OCR quality
+    for page_num, page in enumerate(doc, 1):
+        pix = page.get_pixmap(matrix=mat)
+        img_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+        try:
+            resp = client.chat.completions.create(
+                model=env["FILEDROP_LLM_MODEL"],
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    ],
+                }],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+            text = strip_thinking(text)
+        except Exception as exc:
+            text = f"> [!error] Page {page_num} OCR failed: {exc}"
+        pages.append(f"### Page {page_num}\n\n{text}")
+
+    return "\n\n".join(pages)
 
 
 def main(argv=None, env=None):
