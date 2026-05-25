@@ -2,4 +2,4 @@
 markitdown
 openai
 extract-msg
-pdf2image
+pymupdf
