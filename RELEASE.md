@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.12 — Increase LLM timeouts to 12 minutes
+
+### Changes
+
+- Increase per-request OpenAI client timeout from 120s to 720s (12 minutes)
+- Increase MSG subprocess timeout from 10 to 12 minutes for generous headroom
+
 ## 0.1.11 — Fix LLM call timeouts for email attachments
 
 ### Changes
