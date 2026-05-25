@@ -17,6 +17,7 @@ export interface FileDropSettings {
 	incomingDir: string;
 	categories: string[];
 	defaultTags: string[];
+	preferredTags: string;
 	llmGateways: LlmGateway[];
 	pythonCommand: string;
 	// Legacy fields — read on first load for migration only
@@ -60,9 +61,32 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
+	preferredTags: '',
 	llmGateways: [],
 	pythonCommand: 'python3',
 };
+
+export interface PreferredTag {
+	tag: string;
+	description: string;
+}
+
+// Parse the "Preferred tags" textarea: one "tag: description" per line.
+// Split on the first colon so descriptions may contain colons; a line with
+// no colon is treated as a bare tag.
+export function parsePreferredTags(raw: string): PreferredTag[] {
+	if (!raw) return [];
+	return raw
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => line.length > 0)
+		.map((line) => {
+			const i = line.indexOf(':');
+			if (i === -1) return { tag: line, description: '' };
+			return { tag: line.slice(0, i).trim(), description: line.slice(i + 1).trim() };
+		})
+		.filter((p) => p.tag.length > 0);
+}
 
 export function isGatewayEnabled(gw: LlmGateway): boolean {
 	return gw.apiKey.length > 0 && gw.model.length > 0;
@@ -159,6 +183,131 @@ export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
 			.sort();
 	} catch {
 		new Notice('FileDrop: could not fetch models from the gateway.');
+		return [];
+	}
+}
+
+const TAG_SUGGEST_TIMEOUT_MS = 30_000;
+
+// Conversion failures are written into the note body as callouts; we must not
+// ask the LLM to tag an error message. Matches conversionErrorBody() in convert.ts.
+function isErrorBody(content: string): boolean {
+	const head = content.trimStart();
+	return head.startsWith('> [!error]') || head.startsWith('> [!warning]');
+}
+
+// Reasoning models emit chain-of-thought inline; strip it so it never pollutes
+// the tag parse. Mirrors strip_thinking in python/filedrop_convert.py.
+function stripThinking(text: string): string {
+	let cleaned = text.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, '');
+	const closers = /<\/(think|thinking|reasoning)>/gi;
+	let lastEnd = -1;
+	let m: RegExpExecArray | null;
+	while ((m = closers.exec(cleaned)) !== null) {
+		lastEnd = m.index + m[0].length;
+	}
+	if (lastEnd !== -1) cleaned = cleaned.slice(lastEnd);
+	return cleaned.trim();
+}
+
+function parseTagReply(raw: string, maxTags: number): string[] {
+	let text = stripThinking(raw).trim();
+	text = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+
+	let items: string[] = [];
+	const arrMatch = text.match(/\[[\s\S]*\]/);
+	if (arrMatch) {
+		try {
+			const parsed = JSON.parse(arrMatch[0]);
+			if (Array.isArray(parsed)) items = parsed.map((x) => String(x));
+		} catch {
+			/* fall through to delimiter split */
+		}
+	}
+	if (items.length === 0) {
+		items = text.split(/[,\n]/);
+	}
+
+	const seen = new Set<string>();
+	const out: string[] = [];
+	for (const item of items) {
+		const t = item
+			.trim()
+			.replace(/^["'\-*\s]+/, '')
+			.replace(/["'\s]+$/, '')
+			.replace(/^#/, '');
+		if (!t) continue;
+		const key = t.toLowerCase();
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(t);
+		if (out.length >= maxTags) break;
+	}
+	return out;
+}
+
+// Ask the configured gateway to suggest tags for converted content. Prefers the
+// user's preferred tags but may add new ones. Returns [] (never throws) when no
+// usable gateway, an insecure URL, error-body content, or any request failure —
+// callers fall back to default tags.
+export async function suggestTags(
+	content: string,
+	gateway: LlmGateway | null,
+	preferred: PreferredTag[],
+	options?: { maxTags?: number; maxContentChars?: number }
+): Promise<string[]> {
+	if (!gateway || !isGatewayEnabled(gateway)) return [];
+	if (!isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — skipping tag suggestion.');
+		return [];
+	}
+	if (!content || isErrorBody(content)) return [];
+
+	const maxTags = options?.maxTags ?? 6;
+	const maxChars = options?.maxContentChars ?? 6000;
+	const body = content.slice(0, maxChars);
+
+	const preferredList = preferred.length
+		? preferred.map((p) => (p.description ? `- ${p.tag}: ${p.description}` : `- ${p.tag}`)).join('\n')
+		: '(none configured)';
+
+	const system =
+		'You suggest topical tags for a document. ' +
+		'Strongly prefer tags from the provided preferred list when they apply. ' +
+		'You may add a few new concise lowercase tags only if no preferred tag fits. ' +
+		`Return at most ${maxTags} tags as a JSON array of strings, e.g. ["a","b"]. ` +
+		'Return ONLY the JSON array, with no other text.';
+	const user = `Preferred tags:\n${preferredList}\n\nDocument content:\n${body}`;
+
+	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+	const request = requestUrl({
+		url,
+		method: 'POST',
+		throw: false,
+		headers: {
+			Authorization: `Bearer ${gateway.apiKey}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			model: gateway.model,
+			temperature: 0,
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: user },
+			],
+		}),
+	});
+
+	// requestUrl has no timeout option; race it so a stalled gateway can't block the drop.
+	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), TAG_SUGGEST_TIMEOUT_MS));
+
+	try {
+		const res = await Promise.race([request, timeout]);
+		if (!res) return [];
+		const reply = res.json?.choices?.[0]?.message?.content;
+		if (typeof reply !== 'string') return [];
+		return parseTagReply(reply, maxTags);
+	} catch {
 		return [];
 	}
 }
