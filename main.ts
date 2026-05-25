@@ -8,6 +8,8 @@ import {
 	PluginData,
 	VIEW_TYPE,
 	migrateLegacyLlmFields,
+	parsePreferredTags,
+	suggestTags,
 } from './src/settings';
 import { runMarkitdown, runMsgConversion } from './src/convert';
 import { getMonthSlug } from './src/utils';
@@ -115,6 +117,9 @@ export default class FileDropPlugin extends Plugin {
 			markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
 		}
 
+		const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
+		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+
 		// Find a unique note path for duplicate drops
 		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
 		let notePath = baseNote;
@@ -131,7 +136,7 @@ export default class FileDropPlugin extends Plugin {
 			`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
 			'processed: false',
 			'verified: false',
-			`tags: ${JSON.stringify(this.settings.defaultTags)}`,
+			`tags: ${JSON.stringify(mergedTags)}`,
 		];
 		if (attachmentFrontmatterLines.length > 0) {
 			frontmatterLines.push('attachments:');
@@ -146,7 +151,7 @@ export default class FileDropPlugin extends Plugin {
 			filename: file.name,
 			filePath: rawFilePath,
 			notePath,
-			tags: [...this.settings.defaultTags],
+			tags: [...mergedTags],
 			category,
 			droppedAt: Date.now(),
 			verified: false,
@@ -186,7 +191,18 @@ export default class FileDropPlugin extends Plugin {
 		const content = await vault.read(noteFile);
 		const closingIdx = content.indexOf('\n---\n');
 		if (closingIdx < 0) return;
-		await vault.modify(noteFile, content.slice(0, closingIdx + 5) + '\n' + newBody);
+
+		const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
+		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+		const frontmatter = content
+			.slice(0, closingIdx + 5)
+			.replace(/^tags:.*$/m, `tags: ${JSON.stringify(mergedTags)}`);
+
+		await vault.modify(noteFile, frontmatter + '\n' + newBody);
+
+		entry.tags = [...mergedTags];
+		await this.saveSettings();
+		this.getActiveView()?.renderFileList();
 	}
 
 	async syncIncomingFolder(): Promise<void> {

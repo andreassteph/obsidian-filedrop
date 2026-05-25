@@ -67,6 +67,19 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName('Preferred tags')
+			.setDesc('One per line as "tag: description". After conversion the LLM is asked to prefer these tags.')
+			.addTextArea((text) =>
+				text
+					.setPlaceholder('invoice: financial bills and receipts\nmeeting: notes from calls or meetings')
+					.setValue(this.plugin.settings.preferredTags)
+					.onChange(async (value) => {
+						this.plugin.settings.preferredTags = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
 		new Setting(containerEl).setName('LLM gateways').setHeading();
 
 		this.plugin.settings.llmGateways.forEach((gw, idx) => {
