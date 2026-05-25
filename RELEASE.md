@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.5 — Add verified status tracking and multi-LLM gateway with per-drop model selection
+
+### Changes
+
+- Add verified checkbox to file entries so files can be marked as reviewed; syncs state with incoming folder
+- Add incoming folder sync that picks up files dropped outside the plugin and reflects them in the sidebar
+- Add multi-LLM gateway support with a per-drop model selector for choosing the LLM at conversion time
+
 ## 0.1.4 — Add multi-provider LLM support and refactor plugin internals
 
 ### Changes
