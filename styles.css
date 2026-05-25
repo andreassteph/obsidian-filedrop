@@ -229,6 +229,29 @@
   width: 100%;
 }
 
+.filedrop-gateway-entry {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  margin-bottom: 12px;
+}
+
+.filedrop-verified-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+  margin-left: auto;
+  margin-right: 4px;
+}
+
+.filedrop-verified-checkbox {
+  cursor: pointer;
+}
+
 .filedrop-check-row {
   display: flex;
   align-items: baseline;

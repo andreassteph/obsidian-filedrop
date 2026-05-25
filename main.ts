@@ -7,6 +7,7 @@ import {
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
+	migrateLegacyLlmFields,
 } from './src/settings';
 import { runMarkitdown } from './src/convert';
 import { getMonthSlug } from './src/utils';
@@ -30,6 +31,7 @@ export default class FileDropPlugin extends Plugin {
 			callback: () => this.activateView(),
 		});
 		this.addSettingTab(new FileDropSettingTab(this.app, this));
+		this.app.workspace.onLayoutReady(() => this.syncIncomingFolder());
 	}
 
 	async onunload(): Promise<void> {
@@ -38,7 +40,15 @@ export default class FileDropPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PluginData> | null;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
+		const rawSettings = (data?.settings ?? {}) as Partial<FileDropSettings>;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, rawSettings);
+		this.settings.llmGateways = migrateLegacyLlmFields(rawSettings);
+		// Strip legacy fields so they are not re-persisted after migration
+		delete (this.settings as any).llmProvider;
+		delete (this.settings as any).llmGatewayUrl;
+		delete (this.settings as any).llmApiKey;
+		delete (this.settings as any).llmModel;
+		delete (this.settings as any).llmPrompt;
 		this.recentFiles = data?.recentFiles ?? [];
 	}
 
@@ -51,7 +61,7 @@ export default class FileDropPlugin extends Plugin {
 		return leaves.length > 0 ? (leaves[0].view as FileDropView) : null;
 	}
 
-	async processDroppedFile(file: File, category: string): Promise<void> {
+	async processDroppedFile(file: File, category: string, gatewayId: string | null): Promise<void> {
 		const { vault } = this.app;
 		const monthSlug = getMonthSlug();
 		const subfolderPath = normalizePath(`${this.settings.incomingDir}/${monthSlug}/${category}`);
@@ -66,7 +76,10 @@ export default class FileDropPlugin extends Plugin {
 
 		const basePath: string | undefined = (vault.adapter as any).basePath;
 		const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-		const markdownBody = await runMarkitdown(absolutePath, this.settings);
+		const gateway = gatewayId
+			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+			: null;
+		const markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
 
 		// Find a unique note path for duplicate drops
 		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
@@ -83,6 +96,7 @@ export default class FileDropPlugin extends Plugin {
 			'---',
 			`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
 			'processed: false',
+			'verified: false',
 			`tags: ${JSON.stringify(this.settings.defaultTags)}`,
 			'---',
 			'',
@@ -97,11 +111,55 @@ export default class FileDropPlugin extends Plugin {
 			tags: [...this.settings.defaultTags],
 			category,
 			droppedAt: Date.now(),
+			verified: false,
 		};
 		this.recentFiles.unshift(entry);
 		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
 		await this.saveSettings();
 		this.getActiveView()?.renderFileList();
+	}
+
+	async syncIncomingFolder(): Promise<void> {
+		const { vault, metadataCache } = this.app;
+		const incomingDir = normalizePath(this.settings.incomingDir);
+		if (!(await vault.adapter.exists(incomingDir))) return;
+
+		const mdFiles = vault.getMarkdownFiles().filter((f) =>
+			f.path.startsWith(incomingDir + '/')
+		);
+
+		const existingPaths = new Set(this.recentFiles.map((e) => e.notePath));
+		let changed = false;
+
+		for (const file of mdFiles) {
+			if (existingPaths.has(file.path)) continue;
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm || fm.verified !== false) continue;
+
+			const originalFileLink: string = fm['original-file'] ?? '';
+			const linkMatch = originalFileLink.match(/\[\[(.+?)\]\]/);
+			const relPath = linkMatch ? linkMatch[1] : '';
+			const filePath = relPath ? normalizePath(`${incomingDir}/${relPath}`) : '';
+			const filename = relPath ? (relPath.split('/').pop() ?? file.name) : file.name;
+			const pathParts = relPath.split('/');
+			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
+
+			this.recentFiles.push({
+				filename,
+				filePath,
+				notePath: file.path,
+				tags: Array.isArray(fm.tags) ? fm.tags : [],
+				category,
+				droppedAt: file.stat.ctime,
+				verified: false,
+			});
+			changed = true;
+		}
+
+		if (changed) {
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+		}
 	}
 
 	private async ensureDir(path: string): Promise<void> {
