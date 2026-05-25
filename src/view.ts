@@ -1,12 +1,14 @@
 import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, VIEW_TYPE } from './settings';
+import { DroppedFile, VIEW_TYPE, isGatewayEnabled } from './settings';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
 	private plugin: FileDropPlugin;
 	private fileListEl: HTMLElement | null = null;
 	private selectedCategory: string;
+	private selectedGatewayId: string | null = null;
+	private modelSelectEl: HTMLSelectElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
 		super(leaf);
@@ -35,6 +37,15 @@ export class FileDropView extends ItemView {
 			this.selectedCategory = categorySelect.value;
 		});
 
+		// Model / gateway selector
+		const modelRow = container.createDiv({ cls: 'filedrop-category-row' });
+		modelRow.createEl('label', { cls: 'filedrop-category-label', text: 'Model' });
+		this.modelSelectEl = modelRow.createEl('select', { cls: 'filedrop-category-select' });
+		this.populateModelSelect(this.modelSelectEl);
+		this.modelSelectEl.addEventListener('change', () => {
+			this.selectedGatewayId = this.modelSelectEl!.value || null;
+		});
+
 		// Drop zone
 		const dropZone = container.createDiv({ cls: 'filedrop-zone' });
 		dropZone.createDiv({ cls: 'filedrop-icon' });
@@ -61,7 +72,7 @@ export class FileDropView extends ItemView {
 			const files = e.dataTransfer?.files;
 			if (!files || files.length === 0) return;
 			for (const file of Array.from(files)) {
-				await this.plugin.processDroppedFile(file, this.selectedCategory);
+				await this.plugin.processDroppedFile(file, this.selectedCategory, this.selectedGatewayId);
 			}
 		});
 
@@ -72,6 +83,26 @@ export class FileDropView extends ItemView {
 
 	async onClose(): Promise<void> {
 		// nothing to clean up
+	}
+
+	private populateModelSelect(el: HTMLSelectElement): void {
+		el.empty();
+		const noneOpt = el.createEl('option', { value: '', text: '— None —' });
+		noneOpt.selected = !this.selectedGatewayId;
+		this.plugin.settings.llmGateways
+			.filter((gw) => isGatewayEnabled(gw))
+			.forEach((gw) => {
+				const opt = el.createEl('option', { value: gw.id, text: `${gw.name} (${gw.model})` });
+				opt.selected = gw.id === this.selectedGatewayId;
+			});
+	}
+
+	refreshModelSelector(): void {
+		if (!this.modelSelectEl) return;
+		if (!this.plugin.settings.llmGateways.some((g) => g.id === this.selectedGatewayId)) {
+			this.selectedGatewayId = null;
+		}
+		this.populateModelSelect(this.modelSelectEl);
 	}
 
 	renderFileList(): void {

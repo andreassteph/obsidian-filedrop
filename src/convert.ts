@@ -1,7 +1,7 @@
 import { Notice } from 'obsidian';
 
 import convertScript from '../python/filedrop_convert.py';
-import { FileDropSettings, isGatewayUrlSecure, isLlmEnabled } from './settings';
+import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile } = require('child_process') as typeof import('child_process');
@@ -13,22 +13,26 @@ function conversionErrorBody(title: string, detail: string): string {
 	return `> [!error] Conversion error: ${title}\n> ${detail.replace(/\n/g, '\n> ')}`;
 }
 
-export async function runMarkitdown(absolutePath: string, settings: FileDropSettings): Promise<string> {
-	if (isLlmEnabled(settings) && !isGatewayUrlSecure(settings.llmGatewayUrl)) {
+export async function runMarkitdown(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null
+): Promise<string> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
-	} else if (isLlmEnabled(settings)) {
+	} else if (gateway && isGatewayEnabled(gateway)) {
 		return new Promise((resolve) => {
 			execFile(
-				settings.pythonCommand,
+				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
 					timeout: LLM_TIMEOUT_MS,
 					env: {
 						...process.env,
-						FILEDROP_LLM_URL: settings.llmGatewayUrl,
-						FILEDROP_LLM_KEY: settings.llmApiKey,
-						FILEDROP_LLM_MODEL: settings.llmModel,
-						FILEDROP_LLM_PROMPT: settings.llmPrompt,
+						FILEDROP_LLM_URL: gateway.baseUrl,
+						FILEDROP_LLM_KEY: gateway.apiKey,
+						FILEDROP_LLM_MODEL: gateway.model,
+						FILEDROP_LLM_PROMPT: gateway.prompt,
 					},
 				},
 				(error: Error | null, stdout: string) => {

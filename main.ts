@@ -7,6 +7,7 @@ import {
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
+	migrateLegacyLlmFields,
 } from './src/settings';
 import { runMarkitdown } from './src/convert';
 import { getMonthSlug } from './src/utils';
@@ -39,7 +40,15 @@ export default class FileDropPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) as Partial<PluginData> | null;
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data?.settings);
+		const rawSettings = (data?.settings ?? {}) as Partial<FileDropSettings>;
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, rawSettings);
+		this.settings.llmGateways = migrateLegacyLlmFields(rawSettings);
+		// Strip legacy fields so they are not re-persisted after migration
+		delete (this.settings as any).llmProvider;
+		delete (this.settings as any).llmGatewayUrl;
+		delete (this.settings as any).llmApiKey;
+		delete (this.settings as any).llmModel;
+		delete (this.settings as any).llmPrompt;
 		this.recentFiles = data?.recentFiles ?? [];
 	}
 
@@ -52,7 +61,7 @@ export default class FileDropPlugin extends Plugin {
 		return leaves.length > 0 ? (leaves[0].view as FileDropView) : null;
 	}
 
-	async processDroppedFile(file: File, category: string): Promise<void> {
+	async processDroppedFile(file: File, category: string, gatewayId: string | null): Promise<void> {
 		const { vault } = this.app;
 		const monthSlug = getMonthSlug();
 		const subfolderPath = normalizePath(`${this.settings.incomingDir}/${monthSlug}/${category}`);
@@ -67,7 +76,10 @@ export default class FileDropPlugin extends Plugin {
 
 		const basePath: string | undefined = (vault.adapter as any).basePath;
 		const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-		const markdownBody = await runMarkitdown(absolutePath, this.settings);
+		const gateway = gatewayId
+			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+			: null;
+		const markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
 
 		// Find a unique note path for duplicate drops
 		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
