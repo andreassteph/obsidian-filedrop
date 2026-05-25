@@ -180,7 +180,7 @@ def main(argv=None, env=None):
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
     action = describe if env.get("FILEDROP_DESCRIBE") else convert
-    sys.stdout.write(action(argv[1], env))
+    sys.stdout.buffer.write(action(argv[1], env).encode("utf-8"))
 
 
 if __name__ == "__main__":
