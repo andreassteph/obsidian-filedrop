@@ -49,6 +49,7 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 				timeout: LLM_TIMEOUT_MS,
 				env: {
 					...process.env,
+					PYTHONUTF8: '1',
 					FILEDROP_DESCRIBE: '1',
 					FILEDROP_LLM_URL: gateway?.baseUrl,
 					FILEDROP_LLM_KEY: gateway?.apiKey,
@@ -88,6 +89,7 @@ export async function runMarkitdown(
 					timeout: LLM_TIMEOUT_MS,
 					env: {
 						...process.env,
+						PYTHONUTF8: '1',
 						FILEDROP_LLM_URL: gateway.baseUrl,
 						FILEDROP_LLM_KEY: gateway.apiKey,
 						FILEDROP_LLM_MODEL: gateway.model,
@@ -124,7 +126,7 @@ export async function runMarkitdown(
 		execFile(
 			'markitdown',
 			[absolutePath],
-			{ timeout: MARKITDOWN_TIMEOUT_MS },
+			{ timeout: MARKITDOWN_TIMEOUT_MS, env: { ...process.env, PYTHONUTF8: '1' } },
 			(error: Error | null, stdout: string) => {
 				if (error) {
 					const unsupported = unsupportedFormatDetail(error.message);

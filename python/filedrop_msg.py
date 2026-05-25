@@ -192,7 +192,7 @@ def main(argv=None, env=None):
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
     result = convert_msg(argv[1], env)
-    json.dump(result, sys.stdout, ensure_ascii=False)
+    sys.stdout.buffer.write(json.dumps(result, ensure_ascii=False).encode("utf-8"))
 
 
 if __name__ == "__main__":
