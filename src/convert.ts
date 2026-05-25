@@ -11,7 +11,7 @@ const MARKITDOWN_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 180_000;
 // MSG conversion runs body + every attachment through the LLM sequentially,
 // so scanned PDFs with many pages need a much larger budget.
-const MSG_LLM_TIMEOUT_MS = 600_000;
+const MSG_LLM_TIMEOUT_MS = 720_000;
 
 // The binary/executable family markitdown reports as unsupported.
 const EXECUTABLE_EXTS = new Set([
