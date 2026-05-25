@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.4 — Add multi-provider LLM support and refactor plugin internals
+
+### Changes
+
+- Add LLM provider selector in settings supporting Google Gemini, OpenAI, and custom endpoints for image descriptions
+- Strip reasoning model "thinking" tokens from LLM image descriptions to avoid leaking raw chain-of-thought into notes
+- Include the full filename with extension in generated note names
+- Refactor: extract Python conversion logic into a standalone testable file and split main.ts into focused modules
+
 ## 0.1.3 — Fix file conversion on Windows for paths with spaces
 
 ### Changes
