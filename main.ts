@@ -1,8 +1,23 @@
-import { ItemView, Plugin, WorkspaceLeaf } from 'obsidian';
+import { App, ItemView, Plugin, PluginSettingTab, Setting, WorkspaceLeaf } from 'obsidian';
 
 const VIEW_TYPE = 'filedrop-sidebar';
 
+interface FileDropSettings {
+	incomingDir: string;
+}
+
+const DEFAULT_SETTINGS: FileDropSettings = {
+	incomingDir: 'incoming',
+};
+
 class FileDropView extends ItemView {
+	private plugin: FileDropPlugin;
+
+	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
+		super(leaf);
+		this.plugin = plugin;
+	}
+
 	getViewType(): string {
 		return VIEW_TYPE;
 	}
@@ -46,9 +61,10 @@ class FileDropView extends ItemView {
 			const files = e.dataTransfer?.files;
 			if (!files || files.length === 0) return;
 
-			// TODO: pass files to markitdown for conversion
+			// TODO: pass files to markitdown for conversion and save to incomingDir
+			const { incomingDir } = this.plugin.settings;
 			Array.from(files).forEach((file) => {
-				console.log('[filedrop] dropped:', file.name, file.type);
+				console.log('[filedrop] dropped:', file.name, '-> saving to:', incomingDir);
 			});
 		});
 	}
@@ -58,9 +74,40 @@ class FileDropView extends ItemView {
 	}
 }
 
+class FileDropSettingTab extends PluginSettingTab {
+	private plugin: FileDropPlugin;
+
+	constructor(app: App, plugin: FileDropPlugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		new Setting(containerEl)
+			.setName('Incoming directory')
+			.setDesc('Vault-relative path where dropped files will be stored.')
+			.addText((text) =>
+				text
+					.setPlaceholder('incoming')
+					.setValue(this.plugin.settings.incomingDir)
+					.onChange(async (value) => {
+						this.plugin.settings.incomingDir = value.trim() || DEFAULT_SETTINGS.incomingDir;
+						await this.plugin.saveSettings();
+					})
+			);
+	}
+}
+
 export default class FileDropPlugin extends Plugin {
+	settings: FileDropSettings;
+
 	async onload(): Promise<void> {
-		this.registerView(VIEW_TYPE, (leaf) => new FileDropView(leaf));
+		await this.loadSettings();
+
+		this.registerView(VIEW_TYPE, (leaf) => new FileDropView(leaf, this));
 
 		this.addRibbonIcon('inbox', 'FileDrop', () => this.activateView());
 
@@ -69,10 +116,20 @@ export default class FileDropPlugin extends Plugin {
 			name: 'Open FileDrop sidebar',
 			callback: () => this.activateView(),
 		});
+
+		this.addSettingTab(new FileDropSettingTab(this.app, this));
 	}
 
 	async onunload(): Promise<void> {
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+	}
+
+	async loadSettings(): Promise<void> {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings(): Promise<void> {
+		await this.saveData(this.settings);
 	}
 
 	async activateView(): Promise<void> {
