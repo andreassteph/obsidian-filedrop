@@ -80,7 +80,10 @@ export default class FileDropPlugin extends Plugin {
 			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
 			: null;
 
-		const isMsgFile = file.name.toLowerCase().endsWith('.msg');
+		const isMsgFile =
+			file.name.toLowerCase().endsWith('.msg') ||
+			file.type === 'application/vnd.ms-outlook' ||
+			file.type === 'application/x-msg';
 		let markdownBody: string;
 		const attachmentFrontmatterLines: string[] = [];
 
