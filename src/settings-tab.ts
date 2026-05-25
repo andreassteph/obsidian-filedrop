@@ -8,7 +8,7 @@ import {
 	gatewayUrlIssue,
 	isGatewayEnabled,
 } from './settings';
-import { checkMarkitdownCli, checkPythonEnv } from './convert';
+import { checkMarkitdownCli, checkPythonEnv, installPythonRequirements, PYTHON_REQUIREMENTS } from './convert';
 import type FileDropPlugin from '../main';
 
 export class FileDropSettingTab extends PluginSettingTab {
@@ -144,6 +144,46 @@ export class FileDropSettingTab extends PluginSettingTab {
 				if (detail) row.createSpan({ cls: 'filedrop-check-detail', text: detail });
 			})
 		);
+
+		new Setting(containerEl).setName('Install Python requirements').setHeading();
+
+		new Setting(containerEl)
+			.setName('Required packages')
+			.setDesc(
+				`Installs ${PYTHON_REQUIREMENTS.join(', ')} into the configured Python environment ` +
+				'via "python -m pip install". Use this to set up or repair the environment without leaving Obsidian.'
+			)
+			.addButton((btn) => {
+				const outputEl = containerEl.createEl('pre', { cls: 'filedrop-pip-output' });
+				outputEl.hide();
+
+				btn.setButtonText('Install packages').onClick(() => {
+					outputEl.show();
+					outputEl.setText('');
+					btn.setDisabled(true);
+					btn.setButtonText('Installing…');
+
+					installPythonRequirements(
+						this.plugin.settings.pythonCommand,
+						(chunk) => {
+							outputEl.textContent += chunk;
+							outputEl.scrollTop = outputEl.scrollHeight;
+						},
+						(ok) => {
+							btn.setDisabled(false);
+							btn.setButtonText('Install packages');
+							outputEl.textContent += ok
+								? '\n✓ Done.'
+								: '\n✗ pip exited with an error — see output above.';
+							new Notice(
+								ok
+									? 'FileDrop: Python packages installed successfully.'
+									: 'FileDrop: pip install failed — check settings for details.'
+							);
+						}
+					);
+				});
+			});
 
 		// Auto-populate models for gateways with credentials but no cached models yet
 		this.plugin.settings.llmGateways.forEach((gw) => {
