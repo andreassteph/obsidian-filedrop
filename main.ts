@@ -9,7 +9,7 @@ import {
 	VIEW_TYPE,
 } from './src/settings';
 import { runMarkitdown } from './src/convert';
-import { getBasename, getMonthSlug } from './src/utils';
+import { getMonthSlug } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
@@ -69,14 +69,14 @@ export default class FileDropPlugin extends Plugin {
 		const markdownBody = await runMarkitdown(absolutePath, this.settings);
 
 		// Find a unique note path for duplicate drops
-		const baseNote = normalizePath(`${subfolderPath}/${getBasename(file.name)}.md`);
+		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
 		let notePath = baseNote;
 		if (await vault.adapter.exists(notePath)) {
 			let i = 2;
-			while (await vault.adapter.exists(normalizePath(`${subfolderPath}/${getBasename(file.name)}-${i}.md`))) {
+			while (await vault.adapter.exists(normalizePath(`${subfolderPath}/${file.name}-${i}.md`))) {
 				i++;
 			}
-			notePath = normalizePath(`${subfolderPath}/${getBasename(file.name)}-${i}.md`);
+			notePath = normalizePath(`${subfolderPath}/${file.name}-${i}.md`);
 		}
 
 		const noteContent = [
