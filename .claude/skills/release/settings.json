@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git fetch *)",
+      "Bash(git describe *)",
+      "Bash(git log *)",
+      "Bash(git tag *)",
+      "Bash(git add manifest.json RELEASE.md)",
+      "Bash(git commit *)",
+      "Bash(git push *)",
+      "Bash(git branch *)",
+      "Bash(git status *)",
+      "Bash(git diff *)",
+      "Bash(gh auth status*)",
+      "Bash(gh release *)",
+      "Bash(./release.sh *)"
+    ]
+  }
+}
