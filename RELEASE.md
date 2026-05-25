@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.6 — Add MSG attachment extraction and embedding
+
+### Changes
+
+- Add support for .msg files: extract email body and all attachments, convert each to markdown, and embed them in a single note
+
 ## 0.1.5 — Add verified status tracking and multi-LLM gateway with per-drop model selection
 
 ### Changes
