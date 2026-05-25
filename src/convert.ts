@@ -170,7 +170,7 @@ export async function runMsgConversion(
 	});
 }
 
-export const PYTHON_REQUIREMENTS = ['markitdown', 'openai', 'extract-msg'];
+export const PYTHON_REQUIREMENTS = ['markitdown', 'openai', 'extract-msg', 'pdf2image'];
 
 export function installPythonRequirements(
 	pythonCommand: string,
@@ -208,6 +208,19 @@ export async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResu
 
 	const openaiCheck = await runPythonCheck(pythonCmd, ['-c', 'import openai; print("ok")']);
 	results.push({ label: 'openai package', ok: openaiCheck.ok, detail: openaiCheck.ok ? undefined : openaiCheck.detail });
+
+	const extractMsgCheck = await runPythonCheck(pythonCmd, ['-c', 'import extract_msg; print("ok")']);
+	results.push({ label: 'extract-msg package', ok: extractMsgCheck.ok, detail: extractMsgCheck.ok ? undefined : extractMsgCheck.detail });
+
+	const pdf2imageCheck = await runPythonCheck(pythonCmd, ['-c', 'import pdf2image; print("ok")']);
+	results.push({ label: 'pdf2image package', ok: pdf2imageCheck.ok, detail: pdf2imageCheck.ok ? undefined : pdf2imageCheck.detail });
+
+	const popplerCheck = await runPythonCheck('pdftoppm', ['-v']);
+	results.push({
+		label: 'poppler (pdftoppm)',
+		ok: popplerCheck.ok,
+		detail: popplerCheck.ok ? undefined : 'not found on PATH — install via: apt install poppler-utils / brew install poppler',
+	});
 
 	return results;
 }
