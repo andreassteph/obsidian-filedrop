@@ -69,13 +69,29 @@ def build_converter(env):
 
 
 def convert(path, env):
-    # Scanned PDFs have no text layer — pdfminer returns nothing.
-    # Render each page via PyMuPDF and send to the LLM instead.
-    if path.lower().endswith(".pdf"):
+    is_pdf = path.lower().endswith(".pdf")
+
+    # Try markitdown with LLM support first. build_converter passes llm_client
+    # and llm_model to MarkItDown, so embedded images inside the PDF are
+    # described by the LLM. Works well for text-layer PDFs. Scanned PDFs often
+    # return empty here because pdfminer finds no text layer and there are no
+    # discrete embedded images — we catch that and fall through.
+    try:
+        result = build_converter(env).convert(path).text_content
+        if result and result.strip():
+            return result
+    except Exception:
+        if not is_pdf:
+            raise  # No image-based fallback for non-PDF files.
+
+    # For PDFs that produced nothing (scanned / image-only), render each page
+    # via PyMuPDF and OCR with the LLM.
+    if is_pdf:
         result = _convert_pdf_pages_with_llm(path, env)
         if result:
             return result
-    return build_converter(env).convert(path).text_content
+
+    return ""
 
 
 def _convert_pdf_pages_with_llm(path, env):

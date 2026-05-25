@@ -107,6 +107,41 @@ def test_install_thinking_filter_strips_completion_content():
     assert response.choices[0].message.content == "A bridge at dusk."
 
 
+def test_convert_pdf_uses_markitdown_when_content_returned():
+    """markitdown returns content for a PDF → use it, skip PyMuPDF."""
+    with patch.object(filedrop_convert, "OpenAI"), \
+            patch.object(filedrop_convert, "MarkItDown") as markitdown, \
+            patch.object(filedrop_convert, "_convert_pdf_pages_with_llm") as pdf_llm:
+        markitdown.return_value.convert.return_value.text_content = "# PDF text"
+        result = filedrop_convert.convert("/tmp/file.pdf", dict(BASE_ENV))
+    assert result == "# PDF text"
+    pdf_llm.assert_not_called()
+
+
+def test_convert_pdf_falls_back_to_pymupdf_when_markitdown_empty():
+    """markitdown returns empty for a PDF → fall back to PyMuPDF image path."""
+    with patch.object(filedrop_convert, "OpenAI"), \
+            patch.object(filedrop_convert, "MarkItDown") as markitdown, \
+            patch.object(filedrop_convert, "_convert_pdf_pages_with_llm") as pdf_llm:
+        markitdown.return_value.convert.return_value.text_content = ""
+        pdf_llm.return_value = "### Page 1\n\nScanned text"
+        result = filedrop_convert.convert("/tmp/file.pdf", dict(BASE_ENV))
+    assert result == "### Page 1\n\nScanned text"
+    pdf_llm.assert_called_once_with("/tmp/file.pdf", dict(BASE_ENV))
+
+
+def test_convert_pdf_falls_back_to_pymupdf_when_markitdown_raises():
+    """markitdown raises for a PDF → fall back to PyMuPDF image path."""
+    with patch.object(filedrop_convert, "OpenAI"), \
+            patch.object(filedrop_convert, "MarkItDown") as markitdown, \
+            patch.object(filedrop_convert, "_convert_pdf_pages_with_llm") as pdf_llm:
+        markitdown.return_value.convert.side_effect = Exception("pdfminer error")
+        pdf_llm.return_value = "### Page 1\n\nOCR result"
+        result = filedrop_convert.convert("/tmp/file.pdf", dict(BASE_ENV))
+    assert result == "### Page 1\n\nOCR result"
+    pdf_llm.assert_called_once()
+
+
 def test_install_thinking_filter_leaves_clean_content():
     client = types.SimpleNamespace(
         chat=types.SimpleNamespace(
