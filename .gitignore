@@ -2,3 +2,8 @@ node_modules/
 main.js
 __pycache__/
 .pytest_cache/
+.mytest/
+.env
+.venv/
+python/manual.cfg
+uv.lock

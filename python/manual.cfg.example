@@ -1,0 +1,12 @@
+[llm]
+# API key for your LLM service (will prompt if not set)
+# api_key = sk-...
+
+# Model name (default: gpt-4o)
+model = gpt-4o
+
+# Optional: Custom API endpoint (default: OpenAI)
+# url = https://api.openai.com/v1
+
+# Optional: Custom system prompt for LLM
+# prompt = You are a helpful document converter...
