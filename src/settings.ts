@@ -7,12 +7,27 @@ export interface FileDropSettings {
 	incomingDir: string;
 	categories: string[];
 	defaultTags: string[];
+	llmProvider: string;
 	llmGatewayUrl: string;
 	llmApiKey: string;
 	llmModel: string;
 	llmPrompt: string;
 	pythonCommand: string;
 }
+
+export interface ProviderDefault {
+	label: string;
+	baseUrl: string;
+	keyPlaceholder: string;
+}
+
+// All providers speak the OpenAI Chat Completions API; only the base URL differs.
+// Gemini is reached through its OpenAI-compatible endpoint.
+export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
+	google: { label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai/', keyPlaceholder: 'AIza…' },
+	openai: { label: 'OpenAI', baseUrl: 'https://api.openai.com/v1', keyPlaceholder: 'sk-…' },
+	custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', keyPlaceholder: 'sk-…' },
+};
 
 export interface DroppedFile {
 	filename: string;
@@ -32,6 +47,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
+	llmProvider: 'custom',
 	llmGatewayUrl: '',
 	llmApiKey: '',
 	llmModel: '',

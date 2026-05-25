@@ -1,6 +1,6 @@
 import { App, Notice, PluginSettingTab, Setting } from 'obsidian';
 
-import { DEFAULT_SETTINGS, fetchModels, gatewayUrlIssue } from './settings';
+import { DEFAULT_SETTINGS, LLM_PROVIDERS, fetchModels, gatewayUrlIssue } from './settings';
 import { checkMarkitdownCli, checkPythonEnv } from './convert';
 import type FileDropPlugin from '../main';
 
@@ -62,9 +62,30 @@ export class FileDropSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName('LLM image processing').setHeading();
 
+		const provider = LLM_PROVIDERS[this.plugin.settings.llmProvider] ?? LLM_PROVIDERS.custom;
+
 		new Setting(containerEl)
-			.setName('Gateway URL')
-			.setDesc('OpenAI-compatible base URL. https:// required, except for local/LAN hosts. Blank uses the default OpenAI endpoint.')
+			.setName('Provider')
+			.setDesc('Where image descriptions are generated. All providers use the OpenAI-compatible API; selecting one prefills the base URL.')
+			.addDropdown((dropdown) => {
+				Object.entries(LLM_PROVIDERS).forEach(([id, { label }]) => dropdown.addOption(id, label));
+				dropdown.setValue(this.plugin.settings.llmProvider);
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.llmProvider = value;
+					if (value !== 'custom') {
+						this.plugin.settings.llmGatewayUrl = LLM_PROVIDERS[value].baseUrl;
+					}
+					// Models are provider-specific — force a re-pull for the new provider.
+					this.plugin.settings.llmModel = '';
+					this.availableModels = [];
+					await this.plugin.saveSettings();
+					this.display();
+				});
+			});
+
+		new Setting(containerEl)
+			.setName('Base URL')
+			.setDesc('Prefilled by the provider; editable for regional or self-hosted endpoints. https:// required, except for local/LAN hosts.')
 			.addText((text) =>
 				text
 					.setPlaceholder('https://api.openai.com/v1')
@@ -80,11 +101,11 @@ export class FileDropSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('API key')
-			.setDesc('Stored unencrypted in this vault’s plugin data. Used only to call your gateway.')
+			.setDesc('Stored unencrypted in this vault’s plugin data. Used only to call your provider.')
 			.addText((text) => {
 				text.inputEl.type = 'password';
 				text
-					.setPlaceholder('sk-…')
+					.setPlaceholder(provider.keyPlaceholder)
 					.setValue(this.plugin.settings.llmApiKey)
 					.onChange(async (value) => {
 						this.plugin.settings.llmApiKey = value.trim();
