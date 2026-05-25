@@ -1,0 +1,10 @@
+{
+  "id": "obsidian-filedrop",
+  "name": "FileDrop",
+  "version": "0.1.0",
+  "minAppVersion": "1.0.0",
+  "description": "Drag & drop files into your vault with markitdown conversion.",
+  "author": "andreassteph",
+  "authorUrl": "",
+  "isDesktopOnly": false
+}
