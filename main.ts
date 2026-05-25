@@ -1,4 +1,4 @@
-import { Plugin, normalizePath } from 'obsidian';
+import { Plugin, TFile, normalizePath } from 'obsidian';
 
 import {
 	DEFAULT_SETTINGS,
@@ -155,6 +155,38 @@ export default class FileDropPlugin extends Plugin {
 		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
 		await this.saveSettings();
 		this.getActiveView()?.renderFileList();
+	}
+
+	async rerunConversion(entry: DroppedFile, gatewayId: string | null): Promise<void> {
+		const { vault } = this.app;
+		const basePath: string | undefined = (vault.adapter as any).basePath;
+		const absolutePath = basePath ? pathJoin(basePath, entry.filePath) : entry.filePath;
+		const gateway = gatewayId
+			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+			: null;
+
+		const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
+		let newBody: string;
+
+		if (isMsgFile) {
+			const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+			const bodyParts: string[] = [msgResult.body];
+			for (const att of msgResult.attachments) {
+				if (att.markdown) {
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+				}
+			}
+			newBody = bodyParts.join('\n\n');
+		} else {
+			newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+		}
+
+		const noteFile = vault.getAbstractFileByPath(entry.notePath);
+		if (!(noteFile instanceof TFile)) return;
+		const content = await vault.read(noteFile);
+		const closingIdx = content.indexOf('\n---\n');
+		if (closingIdx < 0) return;
+		await vault.modify(noteFile, content.slice(0, closingIdx + 5) + '\n' + newBody);
 	}
 
 	async syncIncomingFolder(): Promise<void> {

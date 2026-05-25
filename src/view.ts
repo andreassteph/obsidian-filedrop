@@ -157,6 +157,19 @@ export class FileDropView extends ItemView {
 		const removeBtn = headerRow.createEl('button', { cls: 'filedrop-entry-remove', text: '×' });
 		removeBtn.addEventListener('click', () => this.removeEntry(index));
 
+		const rerunBtn = headerRow.createEl('button', { cls: 'filedrop-entry-rerun', text: '↺' });
+		rerunBtn.title = 'Re-run conversion';
+		rerunBtn.addEventListener('click', async () => {
+			rerunBtn.disabled = true;
+			rerunBtn.setText('…');
+			try {
+				await this.plugin.rerunConversion(entry, this.selectedGatewayId);
+			} finally {
+				rerunBtn.disabled = false;
+				rerunBtn.setText('↺');
+			}
+		});
+
 		const tagsRow = entryEl.createDiv({ cls: 'filedrop-entry-tags' });
 		entry.tags.forEach((tag, tagIndex) => {
 			const chip = tagsRow.createEl('span', { cls: 'filedrop-tag-chip', text: tag });
