@@ -78,15 +78,18 @@ export class FileDropView extends ItemView {
 		if (!this.fileListEl) return;
 		this.fileListEl.empty();
 
-		const entries = this.plugin.recentFiles;
-		if (entries.length === 0) {
+		const unverified = this.plugin.recentFiles
+			.map((entry, index) => ({ entry, index }))
+			.filter(({ entry }) => !entry.verified);
+
+		if (unverified.length === 0) {
 			this.fileListEl.createEl('p', { cls: 'filedrop-empty', text: 'No files yet.' });
 			return;
 		}
 
 		// Group entries by parent folder (everything before the last /)
 		const groups = new Map<string, { entry: DroppedFile; index: number }[]>();
-		entries.forEach((entry, index) => {
+		unverified.forEach(({ entry, index }) => {
 			const lastSlash = entry.filePath.lastIndexOf('/');
 			const folder = lastSlash >= 0 ? entry.filePath.slice(0, lastSlash) : '';
 			if (!groups.has(folder)) groups.set(folder, []);
@@ -110,6 +113,16 @@ export class FileDropView extends ItemView {
 		nameEl.addEventListener('click', () => {
 			this.app.workspace.openLinkText(entry.notePath, '', false);
 		});
+
+		const verifiedLabel = headerRow.createEl('label', { cls: 'filedrop-verified-label' });
+		const verifiedCheckbox = verifiedLabel.createEl('input', { cls: 'filedrop-verified-checkbox' });
+		verifiedCheckbox.type = 'checkbox';
+		verifiedCheckbox.checked = false;
+		verifiedLabel.appendText('verified');
+		verifiedCheckbox.addEventListener('change', async () => {
+			if (verifiedCheckbox.checked) await this.markVerified(index);
+		});
+
 		const removeBtn = headerRow.createEl('button', { cls: 'filedrop-entry-remove', text: '×' });
 		removeBtn.addEventListener('click', () => this.removeEntry(index));
 
@@ -154,11 +167,26 @@ export class FileDropView extends ItemView {
 		this.renderFileList();
 	}
 
+	private async markVerified(index: number): Promise<void> {
+		this.plugin.recentFiles[index].verified = true;
+		await this.plugin.saveSettings();
+		await this.rewriteNoteVerified(this.plugin.recentFiles[index].notePath);
+		this.renderFileList();
+	}
+
 	private async rewriteNoteTags(notePath: string, tags: string[]): Promise<void> {
 		const file = this.app.vault.getAbstractFileByPath(notePath);
 		if (!(file instanceof TFile)) return;
 		const content = await this.app.vault.read(file);
 		const updated = content.replace(/^tags:.*$/m, `tags: ${JSON.stringify(tags)}`);
+		await this.app.vault.modify(file, updated);
+	}
+
+	private async rewriteNoteVerified(notePath: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		if (!(file instanceof TFile)) return;
+		const content = await this.app.vault.read(file);
+		const updated = content.replace(/^verified:.*$/m, 'verified: true');
 		await this.app.vault.modify(file, updated);
 	}
 }

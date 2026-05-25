@@ -36,6 +36,7 @@ export interface DroppedFile {
 	tags: string[];
 	category: string;
 	droppedAt: number;
+	verified?: boolean;
 }
 
 export interface PluginData {

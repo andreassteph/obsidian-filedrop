@@ -30,6 +30,7 @@ export default class FileDropPlugin extends Plugin {
 			callback: () => this.activateView(),
 		});
 		this.addSettingTab(new FileDropSettingTab(this.app, this));
+		this.app.workspace.onLayoutReady(() => this.syncIncomingFolder());
 	}
 
 	async onunload(): Promise<void> {
@@ -83,6 +84,7 @@ export default class FileDropPlugin extends Plugin {
 			'---',
 			`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
 			'processed: false',
+			'verified: false',
 			`tags: ${JSON.stringify(this.settings.defaultTags)}`,
 			'---',
 			'',
@@ -97,11 +99,55 @@ export default class FileDropPlugin extends Plugin {
 			tags: [...this.settings.defaultTags],
 			category,
 			droppedAt: Date.now(),
+			verified: false,
 		};
 		this.recentFiles.unshift(entry);
 		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
 		await this.saveSettings();
 		this.getActiveView()?.renderFileList();
+	}
+
+	async syncIncomingFolder(): Promise<void> {
+		const { vault, metadataCache } = this.app;
+		const incomingDir = normalizePath(this.settings.incomingDir);
+		if (!(await vault.adapter.exists(incomingDir))) return;
+
+		const mdFiles = vault.getMarkdownFiles().filter((f) =>
+			f.path.startsWith(incomingDir + '/')
+		);
+
+		const existingPaths = new Set(this.recentFiles.map((e) => e.notePath));
+		let changed = false;
+
+		for (const file of mdFiles) {
+			if (existingPaths.has(file.path)) continue;
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm || fm.verified !== false) continue;
+
+			const originalFileLink: string = fm['original-file'] ?? '';
+			const linkMatch = originalFileLink.match(/\[\[(.+?)\]\]/);
+			const relPath = linkMatch ? linkMatch[1] : '';
+			const filePath = relPath ? normalizePath(`${incomingDir}/${relPath}`) : '';
+			const filename = relPath ? (relPath.split('/').pop() ?? file.name) : file.name;
+			const pathParts = relPath.split('/');
+			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
+
+			this.recentFiles.push({
+				filename,
+				filePath,
+				notePath: file.path,
+				tags: Array.isArray(fm.tags) ? fm.tags : [],
+				category,
+				droppedAt: file.stat.ctime,
+				verified: false,
+			});
+			changed = true;
+		}
+
+		if (changed) {
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+		}
 	}
 
 	private async ensureDir(path: string): Promise<void> {
