@@ -1,5 +1,8 @@
 import io
+import types
 from unittest.mock import patch
+
+import pytest
 
 import filedrop_convert
 
@@ -61,3 +64,57 @@ def test_main_writes_converted_text_to_stdout():
         with patch("sys.stdout", out):
             filedrop_convert.main(argv=["-c", "/tmp/file.png"], env=dict(BASE_ENV))
     assert out.getvalue() == "# out"
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        # Non-thinking model: passes through (only trimmed).
+        ("A red bicycle leaning on a wall.", "A red bicycle leaning on a wall."),
+        # Well-formed think block before the answer.
+        ("<think>let me look…</think>\nA red bicycle.", "A red bicycle."),
+        # Tag variants and casing.
+        ("<Thinking>reasoning</Thinking>A cat.", "A cat."),
+        ("<reasoning>x</reasoning>\n\nA dog.", "A dog."),
+        # Multi-line reasoning.
+        ("<think>line1\nline2</think>Final.", "Final."),
+        # Dangling closer (opening tag injected by the chat template).
+        ("the model reasons first</think>The answer.", "The answer."),
+        # Empty/None inputs are returned as-is.
+        ("", ""),
+        (None, None),
+    ],
+)
+def test_strip_thinking(raw, expected):
+    assert filedrop_convert.strip_thinking(raw) == expected
+
+
+def _fake_response(content):
+    message = types.SimpleNamespace(content=content)
+    return types.SimpleNamespace(choices=[types.SimpleNamespace(message=message)])
+
+
+def test_install_thinking_filter_strips_completion_content():
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(
+                create=lambda **kw: _fake_response("<think>hmm</think>A bridge at dusk.")
+            )
+        )
+    )
+    filedrop_convert._install_thinking_filter(client)
+    response = client.chat.completions.create(model="m", messages=[])
+    assert response.choices[0].message.content == "A bridge at dusk."
+
+
+def test_install_thinking_filter_leaves_clean_content():
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(
+            completions=types.SimpleNamespace(
+                create=lambda **kw: _fake_response("A plain caption.")
+            )
+        )
+    )
+    filedrop_convert._install_thinking_filter(client)
+    response = client.chat.completions.create(model="m", messages=[])
+    assert response.choices[0].message.content == "A plain caption."
