@@ -361,6 +361,41 @@ class FileDropView extends ItemView {
 	}
 }
 
+interface PythonCheckResult {
+	label: string;
+	ok: boolean;
+	detail?: string;
+}
+
+function runPythonCheck(cmd: string, args: string[]): Promise<PythonCheckResult & { stdout: string }> {
+	return new Promise((resolve) => {
+		execFile(cmd, args, { timeout: 10_000 }, (error: Error | null, stdout: string, stderr: string) => {
+			resolve({ label: '', ok: !error, stdout: stdout.trim(), detail: error ? (stderr.trim() || error.message).split('\n')[0] : undefined });
+		});
+	});
+}
+
+async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResult[]> {
+	const results: PythonCheckResult[] = [];
+
+	const versionCheck = await runPythonCheck(pythonCmd, ['--version']);
+	results.push({
+		label: `Python (${pythonCmd})`,
+		ok: versionCheck.ok,
+		detail: versionCheck.ok ? versionCheck.stdout : versionCheck.detail,
+	});
+
+	if (!versionCheck.ok) return results;
+
+	const markitdownCheck = await runPythonCheck(pythonCmd, ['-c', 'import markitdown; print("ok")']);
+	results.push({ label: 'markitdown package', ok: markitdownCheck.ok, detail: markitdownCheck.ok ? undefined : markitdownCheck.detail });
+
+	const openaiCheck = await runPythonCheck(pythonCmd, ['-c', 'import openai; print("ok")']);
+	results.push({ label: 'openai package', ok: openaiCheck.ok, detail: openaiCheck.ok ? undefined : openaiCheck.detail });
+
+	return results;
+}
+
 class FileDropSettingTab extends PluginSettingTab {
 	private plugin: FileDropPlugin;
 	private availableModels: string[] = [];
@@ -503,6 +538,27 @@ class FileDropSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		const pythonCheckSetting = new Setting(containerEl)
+			.setName('Check Python environment')
+			.setDesc('Verify that the Python command, markitdown, and openai packages are reachable.');
+
+		const statusEl = pythonCheckSetting.controlEl.createDiv({ cls: 'filedrop-python-status' });
+
+		pythonCheckSetting.addButton((btn) =>
+			btn.setButtonText('Check Python').onClick(async () => {
+				statusEl.empty();
+				statusEl.setText('Checking…');
+				const results = await checkPythonEnv(this.plugin.settings.pythonCommand);
+				statusEl.empty();
+				for (const { label, ok, detail } of results) {
+					const row = statusEl.createDiv({ cls: 'filedrop-check-row' });
+					row.createSpan({ cls: `filedrop-check-icon filedrop-check-${ok ? 'ok' : 'fail'}`, text: ok ? '✓' : '✗' });
+					row.createSpan({ cls: 'filedrop-check-label', text: label });
+					if (detail) row.createSpan({ cls: 'filedrop-check-detail', text: detail });
+				}
+			})
+		);
 
 		// Auto-populate models on first open when credentials are present.
 		if (

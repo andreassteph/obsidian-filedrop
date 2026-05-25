@@ -216,3 +216,44 @@
 .filedrop-tag-input:focus {
   border-color: var(--interactive-accent);
 }
+
+/* Python check results */
+
+.filedrop-python-status {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  width: 100%;
+}
+
+.filedrop-check-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.filedrop-check-icon {
+  font-size: 13px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.filedrop-check-ok { color: var(--color-green); }
+.filedrop-check-fail { color: var(--color-red); }
+
+.filedrop-check-label {
+  font-weight: 500;
+  color: var(--text-normal);
+}
+
+.filedrop-check-detail {
+  color: var(--text-faint);
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
