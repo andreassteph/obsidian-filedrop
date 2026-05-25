@@ -2,6 +2,7 @@ import { App, ItemView, Notice, Plugin, PluginSettingTab, Setting, TFile, Worksp
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile } = require('child_process') as typeof import('child_process');
+const { join: pathJoin } = require('path') as typeof import('path');
 
 const VIEW_TYPE = 'filedrop-sidebar';
 const MAX_RECENT_FILES = 50;
@@ -665,7 +666,7 @@ export default class FileDropPlugin extends Plugin {
 		await vault.adapter.writeBinary(rawFilePath, buffer);
 
 		const basePath: string | undefined = (vault.adapter as any).basePath;
-		const absolutePath = basePath ? `${basePath}/${rawFilePath}` : rawFilePath;
+		const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
 		const markdownBody = await runMarkitdown(absolutePath, this.settings);
 
 		// Find a unique note path for duplicate drops
