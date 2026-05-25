@@ -177,6 +177,27 @@
   color: var(--text-error);
 }
 
+.filedrop-entry-rerun {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  box-shadow: none;
+}
+
+.filedrop-entry-rerun:hover {
+  color: var(--interactive-accent);
+}
+
+.filedrop-entry-rerun:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Tags */
 
 .filedrop-entry-tags {
