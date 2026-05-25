@@ -4,10 +4,45 @@
   flex-direction: column;
   padding: 8px;
   box-sizing: border-box;
+  gap: 6px;
 }
+
+/* Category selector */
+
+.filedrop-category-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.filedrop-category-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.filedrop-category-select {
+  flex: 1;
+  font-size: var(--font-ui-small);
+  background-color: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
+.filedrop-category-select:focus {
+  outline: none;
+  border-color: var(--interactive-accent);
+}
+
+/* Drop zone */
 
 .filedrop-zone {
   flex: 1;
+  min-height: 160px;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -59,4 +94,125 @@
   text-align: center;
   padding: 0 20px;
   line-height: 1.4;
+}
+
+/* Recent files list */
+
+.filedrop-recent {
+  max-height: 40%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.filedrop-empty {
+  font-size: var(--font-ui-small);
+  color: var(--text-faint);
+  text-align: center;
+  padding: 12px 0;
+  margin: 0;
+}
+
+.filedrop-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 4px;
+}
+
+.filedrop-group-header {
+  font-size: var(--font-ui-smaller);
+  font-weight: 600;
+  color: var(--text-faint);
+  padding: 2px 2px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.filedrop-entry {
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filedrop-entry-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filedrop-entry-name {
+  font-size: var(--font-ui-small);
+  font-weight: 500;
+  color: var(--text-accent);
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.filedrop-entry-name:hover {
+  text-decoration: underline;
+}
+
+.filedrop-entry-remove {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-faint);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  box-shadow: none;
+}
+
+.filedrop-entry-remove:hover {
+  color: var(--text-error);
+}
+
+/* Tags */
+
+.filedrop-entry-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.filedrop-tag-chip {
+  font-size: var(--font-ui-smaller);
+  background-color: var(--tag-background);
+  color: var(--tag-color);
+  border-radius: 4px;
+  padding: 1px 6px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.filedrop-tag-chip:hover {
+  background-color: var(--background-modifier-error);
+  color: var(--text-error);
+}
+
+.filedrop-tag-input {
+  font-size: var(--font-ui-smaller);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  outline: none;
+  width: 80px;
+  box-shadow: none;
+}
+
+.filedrop-tag-input:focus {
+  border-color: var(--interactive-accent);
 }
