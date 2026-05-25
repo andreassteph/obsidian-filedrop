@@ -59,6 +59,7 @@ def build_converter(env):
     client = OpenAI(
         api_key=env["FILEDROP_LLM_KEY"],
         base_url=env.get("FILEDROP_LLM_URL") or None,
+        timeout=120,
     )
     _install_thinking_filter(client)
     kwargs = {"llm_client": client, "llm_model": env["FILEDROP_LLM_MODEL"]}

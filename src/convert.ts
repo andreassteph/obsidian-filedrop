@@ -8,7 +8,7 @@ import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
 
 const MARKITDOWN_TIMEOUT_MS = 30_000;
-const LLM_TIMEOUT_MS = 120_000;
+const LLM_TIMEOUT_MS = 180_000;
 // MSG conversion runs body + every attachment through the LLM sequentially,
 // so scanned PDFs with many pages need a much larger budget.
 const MSG_LLM_TIMEOUT_MS = 600_000;

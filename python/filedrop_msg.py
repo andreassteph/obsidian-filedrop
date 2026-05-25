@@ -63,7 +63,7 @@ def _build_markitdown(env):
     if url and key and model:
         from openai import OpenAI
         from markitdown import MarkItDown
-        client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None))
+        client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None, timeout=120))
         kwargs = {"llm_client": client, "llm_model": model}
         prompt = env.get("FILEDROP_LLM_PROMPT")
         if prompt:
