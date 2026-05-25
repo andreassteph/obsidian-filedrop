@@ -1,4 +1,4 @@
-import { App, ItemView, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath } from 'obsidian';
+import { App, ItemView, Notice, Plugin, PluginSettingTab, Setting, TFile, WorkspaceLeaf, normalizePath, requestUrl } from 'obsidian';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile } = require('child_process') as typeof import('child_process');
@@ -6,11 +6,32 @@ const { execFile } = require('child_process') as typeof import('child_process');
 const VIEW_TYPE = 'filedrop-sidebar';
 const MAX_RECENT_FILES = 50;
 const MARKITDOWN_TIMEOUT_MS = 30_000;
+const LLM_TIMEOUT_MS = 120_000;
+
+// Inline Python that runs markitdown's LLM image-description path against an
+// OpenAI-compatible gateway. Passed via `python -c`; config comes from env vars.
+const PY_SCRIPT = [
+	'import sys, os',
+	'from markitdown import MarkItDown',
+	'from openai import OpenAI',
+	'client = OpenAI(api_key=os.environ["FILEDROP_LLM_KEY"], base_url=os.environ.get("FILEDROP_LLM_URL") or None)',
+	'kwargs = {"llm_client": client, "llm_model": os.environ["FILEDROP_LLM_MODEL"]}',
+	'prompt = os.environ.get("FILEDROP_LLM_PROMPT")',
+	'if prompt:',
+	'    kwargs["llm_prompt"] = prompt',
+	'md = MarkItDown(**kwargs)',
+	'sys.stdout.write(md.convert(sys.argv[1]).text_content)',
+].join('\n');
 
 interface FileDropSettings {
 	incomingDir: string;
 	categories: string[];
 	defaultTags: string[];
+	llmGatewayUrl: string;
+	llmApiKey: string;
+	llmModel: string;
+	llmPrompt: string;
+	pythonCommand: string;
 }
 
 interface DroppedFile {
@@ -31,7 +52,38 @@ const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
+	llmGatewayUrl: '',
+	llmApiKey: '',
+	llmModel: '',
+	llmPrompt: '',
+	pythonCommand: 'python3',
 };
+
+function isLlmEnabled(settings: FileDropSettings): boolean {
+	return settings.llmApiKey.length > 0 && settings.llmModel.length > 0;
+}
+
+async function fetchModels(settings: FileDropSettings): Promise<string[]> {
+	if (!settings.llmGatewayUrl || !settings.llmApiKey) {
+		new Notice('FileDrop: set the gateway URL and API key before refreshing models.');
+		return [];
+	}
+	const modelsUrl = `${settings.llmGatewayUrl.replace(/\/+$/, '')}/models`;
+	try {
+		const res = await requestUrl({
+			url: modelsUrl,
+			headers: { Authorization: `Bearer ${settings.llmApiKey}` },
+		});
+		const data = (res.json?.data ?? []) as { id?: string }[];
+		return data
+			.map((m) => m.id)
+			.filter((id): id is string => typeof id === 'string')
+			.sort();
+	} catch (err) {
+		new Notice('FileDrop: could not fetch models from the gateway.');
+		return [];
+	}
+}
 
 function getMonthSlug(): string {
 	const d = new Date();
@@ -45,7 +97,34 @@ function getBasename(filename: string): string {
 	return lastDot > 0 ? filename.slice(0, lastDot) : filename;
 }
 
-async function runMarkitdown(absolutePath: string): Promise<string> {
+async function runMarkitdown(absolutePath: string, settings: FileDropSettings): Promise<string> {
+	if (isLlmEnabled(settings)) {
+		return new Promise((resolve) => {
+			execFile(
+				settings.pythonCommand,
+				['-c', PY_SCRIPT, absolutePath],
+				{
+					timeout: LLM_TIMEOUT_MS,
+					env: {
+						...process.env,
+						FILEDROP_LLM_URL: settings.llmGatewayUrl,
+						FILEDROP_LLM_KEY: settings.llmApiKey,
+						FILEDROP_LLM_MODEL: settings.llmModel,
+						FILEDROP_LLM_PROMPT: settings.llmPrompt,
+					},
+				},
+				(error: Error | null, stdout: string) => {
+					if (error) {
+						new Notice('FileDrop: LLM conversion failed — check Python, markitdown, and openai are installed. Note created without body.');
+						resolve('');
+					} else {
+						resolve(stdout.trim());
+					}
+				}
+			);
+		});
+	}
+
 	return new Promise((resolve) => {
 		execFile(
 			'markitdown',
@@ -225,6 +304,7 @@ class FileDropView extends ItemView {
 
 class FileDropSettingTab extends PluginSettingTab {
 	private plugin: FileDropPlugin;
+	private availableModels: string[] = [];
 
 	constructor(app: App, plugin: FileDropPlugin) {
 		super(app, plugin);
@@ -277,6 +357,104 @@ class FileDropSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new Setting(containerEl).setName('LLM image processing').setHeading();
+
+		new Setting(containerEl)
+			.setName('Gateway URL')
+			.setDesc('OpenAI-compatible base URL. Blank uses the default OpenAI endpoint.')
+			.addText((text) =>
+				text
+					.setPlaceholder('https://api.openai.com/v1')
+					.setValue(this.plugin.settings.llmGatewayUrl)
+					.onChange(async (value) => {
+						this.plugin.settings.llmGatewayUrl = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('API key')
+			.setDesc('Stored unencrypted in this vault’s plugin data. Used only to call your gateway.')
+			.addText((text) => {
+				text.inputEl.type = 'password';
+				text
+					.setPlaceholder('sk-…')
+					.setValue(this.plugin.settings.llmApiKey)
+					.onChange(async (value) => {
+						this.plugin.settings.llmApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+			});
+
+		const modelOptions = Array.from(
+			new Set([...this.availableModels, this.plugin.settings.llmModel].filter((m) => m.length > 0))
+		);
+		new Setting(containerEl)
+			.setName('Model')
+			.setDesc('Model used for image descriptions. Refresh to load options from the gateway.')
+			.addDropdown((dropdown) => {
+				if (modelOptions.length === 0) {
+					dropdown.addOption('', 'No models — refresh →');
+					dropdown.setValue('');
+					dropdown.setDisabled(true);
+				} else {
+					modelOptions.forEach((m) => dropdown.addOption(m, m));
+					dropdown.setValue(this.plugin.settings.llmModel);
+				}
+				dropdown.onChange(async (value) => {
+					this.plugin.settings.llmModel = value;
+					await this.plugin.saveSettings();
+				});
+			})
+			.addExtraButton((btn) => {
+				btn.setIcon('refresh-cw')
+					.setTooltip('Refresh model list')
+					.onClick(async () => {
+						this.availableModels = await fetchModels(this.plugin.settings);
+						this.display();
+					});
+			});
+
+		new Setting(containerEl)
+			.setName('Image description prompt')
+			.setDesc('Optional. Steers how images are described. Blank uses markitdown’s default.')
+			.addTextArea((text) =>
+				text
+					.setPlaceholder('Describe this image in detail.')
+					.setValue(this.plugin.settings.llmPrompt)
+					.onChange(async (value) => {
+						this.plugin.settings.llmPrompt = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Python command')
+			.setDesc('Interpreter where markitdown and openai are installed.')
+			.addText((text) =>
+				text
+					.setPlaceholder('python3')
+					.setValue(this.plugin.settings.pythonCommand)
+					.onChange(async (value) => {
+						this.plugin.settings.pythonCommand = value.trim() || DEFAULT_SETTINGS.pythonCommand;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// Auto-populate models on first open when credentials are present.
+		if (
+			this.availableModels.length === 0 &&
+			this.plugin.settings.llmGatewayUrl &&
+			this.plugin.settings.llmApiKey
+		) {
+			fetchModels(this.plugin.settings).then((models) => {
+				if (models.length > 0) {
+					this.availableModels = models;
+					this.display();
+				}
+			});
+		}
 	}
 }
 
@@ -330,7 +508,7 @@ export default class FileDropPlugin extends Plugin {
 
 		const basePath: string | undefined = (vault.adapter as any).basePath;
 		const absolutePath = basePath ? `${basePath}/${rawFilePath}` : rawFilePath;
-		const markdownBody = await runMarkitdown(absolutePath);
+		const markdownBody = await runMarkitdown(absolutePath, this.settings);
 
 		// Find a unique note path for duplicate drops
 		const baseNote = normalizePath(`${subfolderPath}/${getBasename(file.name)}.md`);
