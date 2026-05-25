@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.7 — Improve MSG PDF OCR, add requirements installer, and fix Windows PDF compatibility
+
+### Changes
+
+- Fix Windows PDF compatibility by replacing pdf2image/poppler with PyMuPDF for OCR
+- Fix LLM OCR for scanned PDF attachments embedded in MSG files
+- Add "Install Python Requirements" button to settings for one-click dependency setup
+- Improve MSG file detection and surface extract-msg errors more clearly
+
 ## 0.1.6 — Add MSG attachment extraction and embedding
 
 ### Changes
