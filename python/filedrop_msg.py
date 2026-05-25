@@ -73,7 +73,70 @@ def _build_markitdown(env):
     return MarkItDown()
 
 
-def _safe_convert(md, path):
+def _convert_pdf_pages_with_llm(path, env):
+    """Render every PDF page via PyMuPDF and describe each with the LLM.
+
+    Returns the combined markdown, or None if PyMuPDF or the LLM is
+    unavailable so the caller can fall back to plain markitdown.
+    """
+    url = env.get("FILEDROP_LLM_URL")
+    key = env.get("FILEDROP_LLM_KEY")
+    model = env.get("FILEDROP_LLM_MODEL")
+    if not (url and key and model):
+        return None
+
+    try:
+        import fitz  # pymupdf  # type: ignore
+        from openai import OpenAI
+    except ImportError:
+        return None
+
+    try:
+        doc = fitz.open(path)
+    except Exception:
+        return None
+
+    if not doc.page_count:
+        return None
+
+    client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None))
+    prompt = (
+        env.get("FILEDROP_LLM_PROMPT")
+        or "Transcribe all text visible on this page exactly as it appears. "
+           "For any charts, tables, or images also provide a concise description."
+    )
+
+    pages = []
+    mat = fitz.Matrix(2, 2)  # 2× zoom → better OCR quality
+    for page_num, page in enumerate(doc, 1):
+        pix = page.get_pixmap(matrix=mat)
+        img_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                    ],
+                }],
+            )
+            text = (resp.choices[0].message.content or "").strip()
+        except Exception as exc:
+            text = f"> [!error] Page {page_num} OCR failed: {exc}"
+        pages.append(f"### Page {page_num}\n\n{text}")
+
+    return "\n\n".join(pages)
+
+
+def _safe_convert(md, path, env=None):
+    # Scanned PDFs: render pages via PyMuPDF → LLM instead of relying on
+    # markitdown's text extraction, which returns nothing for image-only pages.
+    if env is not None and path.lower().endswith(".pdf"):
+        result = _convert_pdf_pages_with_llm(path, env)
+        if result is not None:
+            return result
     try:
         result = md.convert(path)
         return (result.text_content or "").strip()
@@ -83,7 +146,7 @@ def _safe_convert(md, path):
 
 def convert_msg(path, env):
     md = _build_markitdown(env)
-    body = _safe_convert(md, path)
+    body = _safe_convert(md, path, env)
 
     attachments = []
     warning = None
@@ -113,7 +176,7 @@ def convert_msg(path, env):
                 with open(att_path, "wb") as fh:
                     fh.write(data)
 
-                att_md = _safe_convert(md, att_path)
+                att_md = _safe_convert(md, att_path, env)
                 attachments.append({
                     "filename": filename,
                     "data_b64": base64.b64encode(data).decode("ascii"),
