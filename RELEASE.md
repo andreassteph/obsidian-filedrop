@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.1.3 — Fix file conversion on Windows for paths with spaces
+
+### Changes
+
+- Fix mixed path separator bug that caused "Command failed" errors on Windows when converting files with spaces in their names
+
 ## 0.1.2 — Add markitdown check button to settings
 
 ### Changes
