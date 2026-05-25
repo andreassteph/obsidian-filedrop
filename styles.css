@@ -280,3 +280,18 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+.filedrop-pip-output {
+  font-family: var(--font-monospace);
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  background: var(--background-secondary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px 10px;
+  margin: 4px 0 12px;
+  max-height: 200px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}

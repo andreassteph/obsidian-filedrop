@@ -5,7 +5,7 @@ import msgScript from '../python/filedrop_msg.py';
 import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { execFile } = require('child_process') as typeof import('child_process');
+const { execFile, spawn } = require('child_process') as typeof import('child_process');
 
 const MARKITDOWN_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
@@ -162,6 +162,27 @@ export async function runMsgConversion(
 			}
 		);
 	});
+}
+
+export const PYTHON_REQUIREMENTS = ['markitdown', 'openai', 'extract-msg'];
+
+export function installPythonRequirements(
+	pythonCommand: string,
+	onData: (chunk: string) => void,
+	onDone: (ok: boolean) => void
+): void {
+	let child: ReturnType<typeof spawn>;
+	try {
+		child = spawn(pythonCommand, ['-m', 'pip', 'install', ...PYTHON_REQUIREMENTS]);
+	} catch (err) {
+		onData(String(err));
+		onDone(false);
+		return;
+	}
+	child.stdout?.on('data', (data: Buffer) => onData(data.toString()));
+	child.stderr?.on('data', (data: Buffer) => onData(data.toString()));
+	child.on('close', (code: number | null) => onDone(code === 0));
+	child.on('error', (err: Error) => { onData(err.message + '\n'); onDone(false); });
 }
 
 export async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResult[]> {
