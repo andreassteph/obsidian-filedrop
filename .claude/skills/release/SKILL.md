@@ -8,7 +8,7 @@ version: 0.2.0
 
 Guides the user through publishing a new GitHub release for the obsidian-filedrop plugin so it can be installed via BRAT.
 
-All shell work is done via scripts in `.claude/skills/release/`. Never run raw git or gh commands directly.
+All shell work is done via scripts in `.claude/skills/release/`. Never run raw git or gh commands directly. Use the relative paths to call the scripts
 
 ## Steps
 
