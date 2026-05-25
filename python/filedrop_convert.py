@@ -136,10 +136,35 @@ def _convert_pdf_pages_with_llm(path, env):
     return "\n\n".join(pages)
 
 
+DEFAULT_DESCRIBE_PROMPT = (
+    "A user saved a file named '{filename}' that cannot be converted to text. "
+    "Based only on its filename, briefly explain what this file most likely is "
+    "(for example, an installer for a specific application, or a system/standard "
+    "library). Keep it to 1-3 sentences and make clear it is an educated guess."
+)
+
+
+def describe(path, env):
+    """Ask the LLM what a file likely is, given only its filename."""
+    client = OpenAI(
+        api_key=env["FILEDROP_LLM_KEY"],
+        base_url=env.get("FILEDROP_LLM_URL") or None,
+    )
+    _install_thinking_filter(client)
+    filename = os.path.basename(path)
+    prompt = (env.get("FILEDROP_DESCRIBE_PROMPT") or DEFAULT_DESCRIBE_PROMPT).format(filename=filename)
+    response = client.chat.completions.create(
+        model=env["FILEDROP_LLM_MODEL"],
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return response.choices[0].message.content or ""
+
+
 def main(argv=None, env=None):
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
-    sys.stdout.write(convert(argv[1], env))
+    action = describe if env.get("FILEDROP_DESCRIBE") else convert
+    sys.stdout.write(action(argv[1], env))
 
 
 if __name__ == "__main__":
