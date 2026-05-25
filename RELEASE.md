@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.11 — Fix LLM call timeouts for email attachments
+
+### Changes
+
+- Add per-request timeout (120s) to OpenAI client calls to prevent indefinite hangs
+- Increase subprocess timeout for LLM conversions from 120s to 180s to prevent race conditions
+
 ## 0.1.10 — Fix UTF-8 encoding for Windows compatibility
 
 ### Changes
