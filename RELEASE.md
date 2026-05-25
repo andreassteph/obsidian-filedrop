@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.1 — Add Python environment check to settings
+
+### Changes
+
+- Add "Check Python" button in settings to verify the configured Python interpreter, markitdown, and openai packages are all installed
+- Show inline ✓/✗ results per package with error detail on failure
+
 ## 0.1.0 — Initial Release
 
 First public release of FileDrop.
