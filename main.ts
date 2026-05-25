@@ -154,6 +154,10 @@ function getBasename(filename: string): string {
 	return lastDot > 0 ? filename.slice(0, lastDot) : filename;
 }
 
+function conversionErrorBody(title: string, detail: string): string {
+	return `> [!error] Conversion error: ${title}\n> ${detail.replace(/\n/g, '\n> ')}`;
+}
+
 async function runMarkitdown(absolutePath: string, settings: FileDropSettings): Promise<string> {
 	if (isLlmEnabled(settings) && !isGatewayUrlSecure(settings.llmGatewayUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
@@ -174,11 +178,15 @@ async function runMarkitdown(absolutePath: string, settings: FileDropSettings): 
 				},
 				(error: Error | null, stdout: string) => {
 					if (error) {
-						new Notice('FileDrop: LLM conversion failed — check Python, markitdown, and openai are installed. Note created without body.');
-						resolve('');
-					} else {
-						resolve(stdout.trim());
+						new Notice('FileDrop: LLM conversion failed — see note body for details.');
+						resolve(conversionErrorBody('LLM conversion failed', error.message));
+						return;
 					}
+					if (!stdout.trim()) {
+						resolve(conversionErrorBody('Conversion produced no output', 'markitdown exited successfully but returned empty content.'));
+						return;
+					}
+					resolve(stdout.trim());
 				}
 			);
 		});
@@ -191,11 +199,15 @@ async function runMarkitdown(absolutePath: string, settings: FileDropSettings): 
 			{ timeout: MARKITDOWN_TIMEOUT_MS },
 			(error: Error | null, stdout: string) => {
 				if (error) {
-					new Notice('FileDrop: markitdown unavailable or failed — note created without body.');
-					resolve('');
-				} else {
-					resolve(stdout.trim());
+					new Notice('FileDrop: markitdown failed — see note body for details.');
+					resolve(conversionErrorBody('markitdown conversion failed', error.message));
+					return;
 				}
+				if (!stdout.trim()) {
+					resolve(conversionErrorBody('Conversion produced no output', 'markitdown exited successfully but returned empty content.'));
+					return;
+				}
+				resolve(stdout.trim());
 			}
 		);
 	});
@@ -373,6 +385,15 @@ function runPythonCheck(cmd: string, args: string[]): Promise<PythonCheckResult 
 			resolve({ label: '', ok: !error, stdout: stdout.trim(), detail: error ? (stderr.trim() || error.message).split('\n')[0] : undefined });
 		});
 	});
+}
+
+async function checkMarkitdownCli(): Promise<PythonCheckResult> {
+	const result = await runPythonCheck('markitdown', ['--version']);
+	return {
+		label: 'markitdown CLI',
+		ok: result.ok,
+		detail: result.ok ? result.stdout : result.detail,
+	};
 }
 
 async function checkPythonEnv(pythonCmd: string): Promise<PythonCheckResult[]> {
@@ -557,6 +578,25 @@ class FileDropSettingTab extends PluginSettingTab {
 					row.createSpan({ cls: 'filedrop-check-label', text: label });
 					if (detail) row.createSpan({ cls: 'filedrop-check-detail', text: detail });
 				}
+			})
+		);
+
+		const cliCheckSetting = new Setting(containerEl)
+			.setName('Check markitdown CLI')
+			.setDesc('Verify that the markitdown command is available on the system PATH (used when LLM conversion is disabled).');
+
+		const cliStatusEl = cliCheckSetting.controlEl.createDiv({ cls: 'filedrop-python-status' });
+
+		cliCheckSetting.addButton((btn) =>
+			btn.setButtonText('Check markitdown').onClick(async () => {
+				cliStatusEl.empty();
+				cliStatusEl.setText('Checking…');
+				const { label, ok, detail } = await checkMarkitdownCli();
+				cliStatusEl.empty();
+				const row = cliStatusEl.createDiv({ cls: 'filedrop-check-row' });
+				row.createSpan({ cls: `filedrop-check-icon filedrop-check-${ok ? 'ok' : 'fail'}`, text: ok ? '✓' : '✗' });
+				row.createSpan({ cls: 'filedrop-check-label', text: label });
+				if (detail) row.createSpan({ cls: 'filedrop-check-detail', text: detail });
 			})
 		);
 
