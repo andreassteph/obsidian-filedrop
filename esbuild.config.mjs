@@ -25,6 +25,7 @@ const context = await esbuild.context({
   ],
   format: "cjs",
   target: "es2018",
+  loader: { ".py": "text" },
   logLevel: "info",
   sourcemap: prod ? false : "inline",
   treeShaking: true,
