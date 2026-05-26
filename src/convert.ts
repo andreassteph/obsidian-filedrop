@@ -87,6 +87,7 @@ export async function runMarkitdown(
 				['-c', convertScript, absolutePath],
 				{
 					timeout: LLM_TIMEOUT_MS,
+					maxBuffer: 200 * 1024 * 1024,
 					env: {
 						...process.env,
 						PYTHONUTF8: '1',
@@ -96,7 +97,7 @@ export async function runMarkitdown(
 						FILEDROP_LLM_PROMPT: gateway.prompt,
 					},
 				},
-				(error: Error | null, stdout: string) => {
+				(error: Error | null, stdout: string, stderr: string) => {
 					if (error) {
 						const unsupported = unsupportedFormatDetail(error.message);
 						if (unsupported) {
@@ -113,7 +114,11 @@ export async function runMarkitdown(
 						return;
 					}
 					if (!stdout.trim()) {
-						resolve(conversionErrorBody('Conversion produced no output', 'markitdown exited successfully but returned empty content.'));
+						const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
+						const detail = diagLines
+							? `markitdown exited but returned empty content.\n\nDiagnostics:\n${diagLines}`
+							: 'markitdown exited successfully but returned empty content.';
+						resolve(conversionErrorBody('Conversion produced no output', detail));
 						return;
 					}
 					resolve(stdout.trim());
@@ -127,7 +132,7 @@ export async function runMarkitdown(
 			'markitdown',
 			[absolutePath],
 			{ timeout: MARKITDOWN_TIMEOUT_MS, env: { ...process.env, PYTHONUTF8: '1' } },
-			(error: Error | null, stdout: string) => {
+			(error: Error | null, stdout: string, stderr: string) => {
 				if (error) {
 					const unsupported = unsupportedFormatDetail(error.message);
 					if (unsupported) {
@@ -140,7 +145,11 @@ export async function runMarkitdown(
 					return;
 				}
 				if (!stdout.trim()) {
-					resolve(conversionErrorBody('Conversion produced no output', 'markitdown exited successfully but returned empty content.'));
+					const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
+					const detail = diagLines
+						? `markitdown exited but returned empty content.\n\nDiagnostics:\n${diagLines}`
+						: 'markitdown exited successfully but returned empty content.';
+					resolve(conversionErrorBody('Conversion produced no output', detail));
 					return;
 				}
 				resolve(stdout.trim());

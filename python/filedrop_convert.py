@@ -32,7 +32,11 @@ def strip_thinking(text):
     for closer in _DANGLING_CLOSERS:
         idx = lowered.rfind(closer)
         if idx != -1:
-            cleaned = cleaned[idx + len(closer):]
+            after = cleaned[idx + len(closer):]
+            if after.strip():
+                cleaned = after        # closer in middle → keep what's after
+            else:
+                cleaned = cleaned[:idx]  # closer at end → strip it, keep what's before
             break
     return cleaned.strip()
 
@@ -89,7 +93,8 @@ def convert(path, env):
         result = build_converter(env).convert(path).text_content
         if result and result.strip():
             return result
-    except Exception:
+    except Exception as exc:
+        print(f"[filedrop] markitdown step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
             raise  # No image-based fallback for non-PDF files.
 
@@ -114,6 +119,7 @@ def _convert_pdf_pages_with_llm(path, env):
     try:
         import fitz  # pymupdf  # type: ignore
     except ImportError:
+        print("[filedrop] PyMuPDF not installed — cannot OCR scanned PDF pages", file=sys.stderr)
         return ""
 
     client = _make_client(env)
