@@ -18,3 +18,16 @@ export function dedupeName(fileName: string, i: number): string {
 	if (lastDot <= 0) return `${fileName}-${i}`;
 	return `${fileName.slice(0, lastDot)}-${i}${fileName.slice(lastDot)}`;
 }
+
+// Rewrite the frontmatter `tags` field to an inline JSON array of quoted strings,
+// e.g. `tags: ["a","b"]`. Obsidian's Properties editor re-serializes tags as a
+// multi-line YAML block list (`tags:\n  - a\n  - b`); we match that whole block —
+// the `tags:` line plus any following `- item` lines — so a rewrite never leaves
+// dangling list items behind and mixes the two styles. Requiring whitespace after
+// the dash keeps the closing `---` fence from being swallowed.
+export function replaceTagsBlock(content: string, tags: string[]): string {
+	return content.replace(
+		/^tags:[^\n]*(?:\n[ \t]*-[ \t]+[^\n]*)*/m,
+		`tags: ${JSON.stringify(tags)}`
+	);
+}

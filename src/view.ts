@@ -1,6 +1,7 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 
 import { DroppedFile, VIEW_TYPE, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
+import { replaceTagsBlock } from './utils';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -320,7 +321,7 @@ export class FileDropView extends ItemView {
 		const file = this.app.vault.getAbstractFileByPath(notePath);
 		if (!(file instanceof TFile)) return;
 		const content = await this.app.vault.read(file);
-		const updated = content.replace(/^tags:.*$/m, `tags: ${JSON.stringify(tags)}`);
+		const updated = replaceTagsBlock(content, tags);
 		await this.app.vault.modify(file, updated);
 	}
 

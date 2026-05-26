@@ -12,7 +12,7 @@ import {
 	suggestTags,
 } from './src/settings';
 import { runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, noteNameFromFile } from './src/utils';
+import { dedupeName, getMonthSlug, noteNameFromFile, replaceTagsBlock } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
@@ -207,9 +207,7 @@ export default class FileDropPlugin extends Plugin {
 
 		const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
 		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
-		const frontmatter = content
-			.slice(0, closingIdx + 5)
-			.replace(/^tags:.*$/m, `tags: ${JSON.stringify(mergedTags)}`);
+		const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
 
 		await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
