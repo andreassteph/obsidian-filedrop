@@ -17,7 +17,12 @@ def test_openai_base_url_none_when_url_blank():
     with patch.object(filedrop_convert, "OpenAI") as openai, \
             patch.object(filedrop_convert, "MarkItDown"):
         filedrop_convert.build_converter(dict(BASE_ENV))
-    openai.assert_called_once_with(api_key="sk-test", base_url=None)
+    openai.assert_called_once_with(
+        api_key="sk-test",
+        base_url=None,
+        default_headers={"x-api-key": "sk-test"},
+        timeout=720,
+    )
 
 
 def test_openai_base_url_uses_gateway_when_set():
@@ -25,7 +30,12 @@ def test_openai_base_url_uses_gateway_when_set():
     with patch.object(filedrop_convert, "OpenAI") as openai, \
             patch.object(filedrop_convert, "MarkItDown"):
         filedrop_convert.build_converter(env)
-    openai.assert_called_once_with(api_key="sk-test", base_url="https://gw.example/v1")
+    openai.assert_called_once_with(
+        api_key="sk-test",
+        base_url="https://gw.example/v1",
+        default_headers={"x-api-key": "sk-test"},
+        timeout=720,
+    )
 
 
 def test_prompt_omitted_when_blank():
