@@ -12,6 +12,10 @@ each piece via markitdown.  Outputs a single JSON object to stdout:
 
 LLM-gateway config is read from environment variables (same keys as
 filedrop_convert.py).  Called as: python -c <inlined-source> <msg_path>
+
+This script is inlined and run via `python -c`, so it cannot import
+filedrop_convert; the shared markitdown/LLM helpers are duplicated here on
+purpose and kept in sync with that file.
 """
 
 import base64
@@ -20,6 +24,13 @@ import os
 import re
 import sys
 import tempfile
+
+from markitdown import MarkItDown
+
+try:
+    from openai import OpenAI
+except ImportError:  # plain .msg conversion still works without the LLM stack
+    OpenAI = None
 
 # Strip chain-of-thought blocks that reasoning models emit before their answer.
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -30,11 +41,18 @@ def _strip_thinking(text):
     if not text:
         return text
     cleaned = _THINK_BLOCK.sub("", text)
+    # Some gateways inject the opening tag via the chat template, so the content
+    # starts mid-reasoning and only the closing tag survives. Keep what follows
+    # the last closer in that case.
     lowered = cleaned.lower()
     for closer in _DANGLING_CLOSERS:
         idx = lowered.rfind(closer)
         if idx != -1:
-            cleaned = cleaned[idx + len(closer):]
+            after = cleaned[idx + len(closer):]
+            if after.strip():
+                cleaned = after        # closer in middle → keep what's after
+            else:
+                cleaned = cleaned[:idx]  # closer at end → strip it, keep what's before
             break
     return cleaned.strip()
 
@@ -56,23 +74,51 @@ def _install_thinking_filter(client):
     return client
 
 
-def _build_markitdown(env):
-    url = env.get("FILEDROP_LLM_URL")
-    key = env.get("FILEDROP_LLM_KEY")
-    model = env.get("FILEDROP_LLM_MODEL")
-    if url and key and model:
-        from openai import OpenAI
-        from markitdown import MarkItDown
-        client = _install_thinking_filter(
-            OpenAI(api_key=key, base_url=url or None, timeout=720, default_headers={"x-api-key": key})
-        )
-        kwargs = {"llm_client": client, "llm_model": model}
-        prompt = env.get("FILEDROP_LLM_PROMPT")
-        if prompt:
-            kwargs["llm_prompt"] = prompt
-        return MarkItDown(**kwargs)
-    from markitdown import MarkItDown
-    return MarkItDown()
+def _llm_configured(env):
+    return bool(
+        OpenAI is not None
+        and env.get("FILEDROP_LLM_URL")
+        and env.get("FILEDROP_LLM_KEY")
+        and env.get("FILEDROP_LLM_MODEL")
+    )
+
+
+def _make_client(env, **kwargs):
+    # x-api-key is sent alongside the SDK's automatic Authorization: Bearer header
+    # because the Siemens gateway requires it; other providers ignore it.
+    key = env["FILEDROP_LLM_KEY"]
+    client = OpenAI(
+        api_key=key,
+        base_url=env.get("FILEDROP_LLM_URL") or None,
+        default_headers={"x-api-key": key, "X-Api-Key": key},
+        **kwargs,
+    )
+    return _install_thinking_filter(client)
+
+
+def _build_llm_markitdown(env):
+    """MarkItDown wired to the LLM gateway, or None when no gateway is set."""
+    if not _llm_configured(env):
+        return None
+    kwargs = {"llm_client": _make_client(env, timeout=720), "llm_model": env["FILEDROP_LLM_MODEL"]}
+    prompt = env.get("FILEDROP_LLM_PROMPT")
+    if prompt:
+        kwargs["llm_prompt"] = prompt
+    return MarkItDown(**kwargs)
+
+
+def _convert_without_llm(path):
+    """Re-run markitdown with no LLM client so a file's extractable text is still
+    captured when the LLM-enhanced step fails. Returns the plain text, or "" if
+    even this fails — never raises, so a failure here can't crash the process and
+    dump the whole invocation into the note."""
+    try:
+        result = MarkItDown().convert(path).text_content
+        if result and result.strip():
+            return result
+    except Exception as exc:
+        print(f"[filedrop] plain markitdown fallback failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+    return ""
 
 
 def _convert_pdf_pages_with_llm(path, env):
@@ -81,16 +127,13 @@ def _convert_pdf_pages_with_llm(path, env):
     Returns the combined markdown, or None if PyMuPDF or the LLM is
     unavailable so the caller can fall back to plain markitdown.
     """
-    url = env.get("FILEDROP_LLM_URL")
-    key = env.get("FILEDROP_LLM_KEY")
-    model = env.get("FILEDROP_LLM_MODEL")
-    if not (url and key and model):
+    if not _llm_configured(env):
         return None
 
     try:
         import fitz  # pymupdf  # type: ignore
-        from openai import OpenAI
     except ImportError:
+        print("[filedrop] PyMuPDF not installed — cannot OCR scanned PDF pages", file=sys.stderr)
         return None
 
     try:
@@ -101,9 +144,7 @@ def _convert_pdf_pages_with_llm(path, env):
     if not doc.page_count:
         return None
 
-    client = _install_thinking_filter(
-        OpenAI(api_key=key, base_url=url or None, default_headers={"x-api-key": key})
-    )
+    client = _make_client(env)
     prompt = (
         env.get("FILEDROP_LLM_PROMPT")
         or "Transcribe all text visible on this page exactly as it appears. "
@@ -117,7 +158,7 @@ def _convert_pdf_pages_with_llm(path, env):
         img_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
         try:
             resp = client.chat.completions.create(
-                model=model,
+                model=env["FILEDROP_LLM_MODEL"],
                 messages=[{
                     "role": "user",
                     "content": [
@@ -127,6 +168,7 @@ def _convert_pdf_pages_with_llm(path, env):
                 }],
             )
             text = (resp.choices[0].message.content or "").strip()
+            text = _strip_thinking(text)
         except Exception as exc:
             text = f"> [!error] Page {page_num} OCR failed: {exc}"
         pages.append(f"### Page {page_num}\n\n{text}")
@@ -134,23 +176,38 @@ def _convert_pdf_pages_with_llm(path, env):
     return "\n\n".join(pages)
 
 
-def _safe_convert(md, path, env=None):
-    # Scanned PDFs: render pages via PyMuPDF → LLM instead of relying on
-    # markitdown's text extraction, which returns nothing for image-only pages.
-    if env is not None and path.lower().endswith(".pdf"):
-        result = _convert_pdf_pages_with_llm(path, env)
-        if result is not None:
-            return result
+def _convert_file(path, llm_md, env):
+    """Convert one file (the .msg body or an attachment) to markdown.
+
+    Mirrors filedrop_convert.convert(): try markitdown-with-LLM first so
+    text-layer PDFs and embedded images are handled cheaply, and only fall back
+    to page-by-page OCR for scanned PDFs that produce nothing. Errors are logged
+    to stderr rather than dumped into the note.
+    """
+    if llm_md is None:
+        return _convert_without_llm(path)
+
+    is_pdf = path.lower().endswith(".pdf")
     try:
-        result = md.convert(path)
-        return (result.text_content or "").strip()
+        result = llm_md.convert(path).text_content
+        if result and result.strip():
+            return result
     except Exception as exc:
-        return f"> [!error] Conversion error: {exc}"
+        print(f"[filedrop] markitdown LLM step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        if not is_pdf:
+            return _convert_without_llm(path)
+
+    if is_pdf:
+        result = _convert_pdf_pages_with_llm(path, env)
+        if result:
+            return result
+
+    return ""
 
 
 def convert_msg(path, env):
-    md = _build_markitdown(env)
-    body = _safe_convert(md, path, env)
+    llm_md = _build_llm_markitdown(env)
+    body = _convert_file(path, llm_md, env)
 
     attachments = []
     warning = None
@@ -180,7 +237,7 @@ def convert_msg(path, env):
                 with open(att_path, "wb") as fh:
                     fh.write(data)
 
-                att_md = _safe_convert(md, att_path, env)
+                att_md = _convert_file(att_path, llm_md, env)
                 attachments.append({
                     "filename": filename,
                     "data_b64": base64.b64encode(data).decode("ascii"),
