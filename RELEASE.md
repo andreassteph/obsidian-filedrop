@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.14 — Support varied LLM model response shapes and add manual fallback
+
+### Changes
+
+- Support varied /v1/models API response shapes from different LLM providers
+- Add manual model selection fallback in settings for additional control
+- Improve LLM provider compatibility and robustness
+
 ## 0.1.13 — Add per-file LLM summaries and tag suggestions
 
 ### Changes
