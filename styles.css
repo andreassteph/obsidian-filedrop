@@ -200,9 +200,11 @@
 
 .filedrop-entry-summary-row {
   display: flex;
+  gap: 6px;
 }
 
-.filedrop-entry-summary {
+.filedrop-entry-summary,
+.filedrop-entry-suggest-tags {
   font-size: var(--font-ui-smaller);
   background: none;
   border: 1px solid var(--background-modifier-border);
@@ -214,12 +216,14 @@
   box-shadow: none;
 }
 
-.filedrop-entry-summary:hover {
+.filedrop-entry-summary:hover,
+.filedrop-entry-suggest-tags:hover {
   color: var(--interactive-accent);
   border-color: var(--interactive-accent);
 }
 
-.filedrop-entry-summary:disabled {
+.filedrop-entry-summary:disabled,
+.filedrop-entry-suggest-tags:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
