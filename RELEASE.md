@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.13 — Add per-file LLM summaries and tag suggestions
+
+### Changes
+
+- Add per-file "Add summary" button that writes LLM-generated summaries to frontmatter
+- Add automatic tag suggestions via LLM after file conversion
+- Add manual conversion script for easier local testing
+
 ## 0.1.12 — Increase LLM timeouts to 12 minutes
 
 ### Changes
