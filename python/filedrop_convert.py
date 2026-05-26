@@ -62,7 +62,7 @@ def _make_client(env, **kwargs):
     return OpenAI(
         api_key=key,
         base_url=env.get("FILEDROP_LLM_URL") or None,
-        default_headers={"x-api-key": key},
+        default_headers={"x-api-key": key, "X-Api-Key": key},
         **kwargs,
     )
 

@@ -52,6 +52,7 @@ def check_openai_connection(llm_config: dict) -> None:
         kwargs = {
             "api_key": api_key,
             "timeout": 10.0,
+            "default_headers": {"x-api-key": api_key, "X-Api-Key": api_key},
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -60,10 +61,30 @@ def check_openai_connection(llm_config: dict) -> None:
 
         # List available models with increased timeout
         models_resp = client.models.list(timeout=10.0)
-        available_models = [m.id for m in models_resp.data]
+        available_models = [m.id for m in (models_resp.data or [])]
 
-        # Check if configured model is available
-        if model not in available_models:
+        if not available_models:
+            # Gateway doesn't expose a real model list — verify via a minimal completion
+            try:
+                client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": "Say 'ok'"}],
+                    max_completion_tokens=5
+                )
+            except APIError as e:
+                status = getattr(e, "status_code", None)
+                print(f"Error: Model test failed (HTTP {status})", file=sys.stderr)
+                print(f"  - Model: '{model}'", file=sys.stderr)
+                if base_url:
+                    print(f"  - Endpoint: {base_url}", file=sys.stderr)
+                if status == 500:
+                    print(f"  - 500 routing error usually means the model name is wrong", file=sys.stderr)
+                    print(f"  - Check FILEDROP_LLM_MODEL in manual.cfg", file=sys.stderr)
+                print(f"  - Raw error: {e}", file=sys.stderr)
+                sys.exit(1)
+            print(f"✓ Connection verified via test completion", file=sys.stderr)
+            print(f"✓ Model '{model}' responded", file=sys.stderr)
+        elif model not in available_models:
             print(f"Error: Model '{model}' not found", file=sys.stderr)
             print(f"  - Check that FILEDROP_LLM_MODEL is correct", file=sys.stderr)
             if base_url:
@@ -72,9 +93,9 @@ def check_openai_connection(llm_config: dict) -> None:
             if len(available_models) > 5:
                 print(f"    ({len(available_models) - 5} more...)", file=sys.stderr)
             sys.exit(1)
-
-        print(f"✓ OpenAI connection verified", file=sys.stderr)
-        print(f"✓ Model '{model}' is available", file=sys.stderr)
+        else:
+            print(f"✓ OpenAI connection verified", file=sys.stderr)
+            print(f"✓ Model '{model}' is available", file=sys.stderr)
     except AuthenticationError as e:
         print("Error: Authentication failed", file=sys.stderr)
         print(f"  - Check that FILEDROP_LLM_KEY is correct", file=sys.stderr)
@@ -116,7 +137,7 @@ def check_openai_connection(llm_config: dict) -> None:
         if base_url:
             print(f"  - Endpoint: {base_url}", file=sys.stderr)
             print(f"  - Tip: Try this command to debug:", file=sys.stderr)
-            print(f"    curl -v {base_url}models", file=sys.stderr)
+            print(f"    curl -v {base_url.rstrip('/')}/models", file=sys.stderr)
         sys.exit(1)
 
 
