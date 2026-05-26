@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.15 — Fix API header capitalization for LLM requests
+
+### Changes
+
+- Fix X-API header capitalization in model detection requests
+- Improve manual conversion script for better local testing
+
 ## 0.1.14 — Support varied LLM model response shapes and add manual fallback
 
 ### Changes
