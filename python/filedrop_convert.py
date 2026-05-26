@@ -96,7 +96,12 @@ def convert(path, env):
     except Exception as exc:
         print(f"[filedrop] markitdown step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
-            raise  # No image-based fallback for non-PDF files.
+            # LLM-enhanced conversion failed (e.g. PPTX slide with no embedded image).
+            # Retry without LLM — text content is still extracted.
+            plain_result = MarkItDown().convert(path).text_content
+            if plain_result and plain_result.strip():
+                return plain_result
+            return ""
 
     # For PDFs that produced nothing (scanned / image-only), render each page
     # via PyMuPDF and OCR with the LLM.
