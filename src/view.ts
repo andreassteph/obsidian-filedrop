@@ -1,6 +1,6 @@
-import { ItemView, TFile, WorkspaceLeaf } from 'obsidian';
+import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, VIEW_TYPE, isGatewayEnabled } from './settings';
+import { DroppedFile, VIEW_TYPE, isGatewayEnabled, summarizeContent } from './settings';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -170,6 +170,20 @@ export class FileDropView extends ItemView {
 			}
 		});
 
+		const summaryRow = entryEl.createDiv({ cls: 'filedrop-entry-summary-row' });
+		const summaryBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-summary', text: 'Add summary' });
+		summaryBtn.title = 'Generate summary with the selected LLM';
+		summaryBtn.addEventListener('click', async () => {
+			summaryBtn.disabled = true;
+			summaryBtn.setText('Summarizing…');
+			try {
+				await this.summarizeEntry(entry);
+			} finally {
+				summaryBtn.disabled = false;
+				summaryBtn.setText('Add summary');
+			}
+		});
+
 		const tagsRow = entryEl.createDiv({ cls: 'filedrop-entry-tags' });
 		entry.tags.forEach((tag, tagIndex) => {
 			const chip = tagsRow.createEl('span', { cls: 'filedrop-tag-chip', text: tag });
@@ -216,6 +230,49 @@ export class FileDropView extends ItemView {
 		await this.plugin.saveSettings();
 		await this.rewriteNoteVerified(this.plugin.recentFiles[index].notePath);
 		this.renderFileList();
+	}
+
+	private async summarizeEntry(entry: DroppedFile): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		if (!gateway || !isGatewayEnabled(gateway)) {
+			new Notice('FileDrop: select an LLM model first.');
+			return;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
+		if (!(file instanceof TFile)) {
+			new Notice('FileDrop: could not find the note to summarize.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const i = content.indexOf('\n---\n');
+		const body = i >= 0 ? content.slice(i + 5) : content;
+
+		const summary = await summarizeContent(body, gateway);
+		if (!summary) {
+			new Notice('FileDrop: could not generate a summary.');
+			return;
+		}
+
+		await this.writeNoteSummary(entry.notePath, summary);
+		new Notice('FileDrop: summary added.');
+	}
+
+	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		if (!(file instanceof TFile)) return;
+		const content = await this.app.vault.read(file);
+		const line = `summary: ${JSON.stringify(summary)}`;
+		let updated: string;
+		if (/^summary:.*$/m.test(content)) {
+			updated = content.replace(/^summary:.*$/m, line);
+		} else {
+			const c = content.indexOf('\n---\n');
+			if (c < 0) return;
+			updated = content.slice(0, c) + '\n' + line + content.slice(c);
+		}
+		await this.app.vault.modify(file, updated);
 	}
 
 	private async rewriteNoteTags(notePath: string, tags: string[]): Promise<void> {

@@ -311,3 +311,70 @@ export async function suggestTags(
 		return [];
 	}
 }
+
+const SUMMARY_TIMEOUT_MS = 30_000;
+
+function cleanSummaryReply(raw: string): string {
+	let text = stripThinking(raw).trim();
+	text = text.replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```$/i, '').trim();
+	// Collapse newlines/runs of whitespace so the result is a single-line YAML scalar.
+	return text.replace(/\s+/g, ' ').trim();
+}
+
+// Ask the configured gateway for a concise summary of the converted content.
+// Returns null (never throws) when there is no usable gateway, an insecure URL,
+// error-body content, or any request failure — callers surface a notice.
+export async function summarizeContent(
+	content: string,
+	gateway: LlmGateway | null,
+	options?: { maxContentChars?: number }
+): Promise<string | null> {
+	if (!gateway || !isGatewayEnabled(gateway)) return null;
+	if (!isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — skipping summary.');
+		return null;
+	}
+	if (!content || isErrorBody(content)) return null;
+
+	const maxChars = options?.maxContentChars ?? 20000;
+	const body = content.slice(0, maxChars);
+
+	const system =
+		'You write a concise summary of a document. ' +
+		'Respond with 1-2 plain sentences capturing the main point. ' +
+		'No markdown, no preamble, no labels — return only the summary text.';
+	const user = `Document content:\n${body}`;
+
+	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+	const request = requestUrl({
+		url,
+		method: 'POST',
+		throw: false,
+		headers: {
+			Authorization: `Bearer ${gateway.apiKey}`,
+			'Content-Type': 'application/json',
+		},
+		body: JSON.stringify({
+			model: gateway.model,
+			temperature: 0,
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: user },
+			],
+		}),
+	});
+
+	// requestUrl has no timeout option; race it so a stalled gateway can't hang the UI.
+	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), SUMMARY_TIMEOUT_MS));
+
+	try {
+		const res = await Promise.race([request, timeout]);
+		if (!res) return null;
+		const reply = res.json?.choices?.[0]?.message?.content;
+		if (typeof reply !== 'string') return null;
+		const summary = cleanSummaryReply(reply);
+		return summary.length > 0 ? summary : null;
+	} catch {
+		return null;
+	}
+}

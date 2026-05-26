@@ -198,6 +198,32 @@
   cursor: not-allowed;
 }
 
+.filedrop-entry-summary-row {
+  display: flex;
+}
+
+.filedrop-entry-summary {
+  font-size: var(--font-ui-smaller);
+  background: none;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 2px 8px;
+  line-height: 1;
+  box-shadow: none;
+}
+
+.filedrop-entry-summary:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
+}
+
+.filedrop-entry-summary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Tags */
 
 .filedrop-entry-tags {
