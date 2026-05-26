@@ -1,6 +1,6 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, VIEW_TYPE, isGatewayEnabled, summarizeContent } from './settings';
+import { DroppedFile, VIEW_TYPE, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -184,6 +184,19 @@ export class FileDropView extends ItemView {
 			}
 		});
 
+		const suggestBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-suggest-tags', text: 'Suggest tags' });
+		suggestBtn.title = 'Suggest tags with the selected LLM';
+		suggestBtn.addEventListener('click', async () => {
+			suggestBtn.disabled = true;
+			suggestBtn.setText('Suggesting…');
+			try {
+				await this.suggestTagsForEntry(entry, index);
+			} finally {
+				suggestBtn.disabled = false;
+				suggestBtn.setText('Suggest tags');
+			}
+		});
+
 		const tagsRow = entryEl.createDiv({ cls: 'filedrop-entry-tags' });
 		entry.tags.forEach((tag, tagIndex) => {
 			const chip = tagsRow.createEl('span', { cls: 'filedrop-tag-chip', text: tag });
@@ -257,6 +270,34 @@ export class FileDropView extends ItemView {
 
 		await this.writeNoteSummary(entry.notePath, summary);
 		new Notice('FileDrop: summary added.');
+	}
+
+	private async suggestTagsForEntry(entry: DroppedFile, index: number): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		if (!gateway || !isGatewayEnabled(gateway)) {
+			new Notice('FileDrop: select an LLM model first.');
+			return;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
+		if (!(file instanceof TFile)) {
+			new Notice('FileDrop: could not find the note to tag.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const i = content.indexOf('\n---\n');
+		const body = i >= 0 ? content.slice(i + 5) : content;
+
+		const suggested = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags));
+		if (suggested.length === 0) {
+			new Notice('FileDrop: no tags suggested.');
+			return;
+		}
+
+		const merged = Array.from(new Set([...entry.tags, ...suggested]));
+		await this.updateEntryTags(index, merged);
+		new Notice('FileDrop: tags suggested.');
 	}
 
 	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {
