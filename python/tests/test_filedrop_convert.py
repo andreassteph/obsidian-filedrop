@@ -20,7 +20,7 @@ def test_openai_base_url_none_when_url_blank():
     openai.assert_called_once_with(
         api_key="sk-test",
         base_url=None,
-        default_headers={"x-api-key": "sk-test"},
+        default_headers={"x-api-key": "sk-test", "X-Api-Key": "sk-test"},
         timeout=720,
     )
 
@@ -33,7 +33,7 @@ def test_openai_base_url_uses_gateway_when_set():
     openai.assert_called_once_with(
         api_key="sk-test",
         base_url="https://gw.example/v1",
-        default_headers={"x-api-key": "sk-test"},
+        default_headers={"x-api-key": "sk-test", "X-Api-Key": "sk-test"},
         timeout=720,
     )
 
@@ -70,10 +70,11 @@ def test_main_writes_converted_text_to_stdout():
     with patch.object(filedrop_convert, "OpenAI"), \
             patch.object(filedrop_convert, "MarkItDown") as markitdown:
         markitdown.return_value.convert.return_value.text_content = "# out"
-        out = io.StringIO()
-        with patch("sys.stdout", out):
+        buffer = io.BytesIO()
+        fake_stdout = types.SimpleNamespace(buffer=buffer)
+        with patch("sys.stdout", fake_stdout):
             filedrop_convert.main(argv=["-c", "/tmp/file.png"], env=dict(BASE_ENV))
-    assert out.getvalue() == "# out"
+    assert buffer.getvalue() == b"# out"
 
 
 @pytest.mark.parametrize(
