@@ -38,6 +38,32 @@ function unsupportedFormatDetail(message: string): string | null {
 	return m ? m[1].trim() : 'This file type is not supported by markitdown.';
 }
 
+// execFile sets error.message to "Command failed: <cmd>\n<stderr>". Because the
+// plugin invokes Python as `-c <inlined source>`, <cmd> embeds the entire
+// script, which is useless noise in a note. Surface the subprocess's stderr
+// instead — the [filedrop] diagnostics plus the final traceback line, which is
+// the real exception — and fall back to a short reason when there is no stderr
+// (e.g. a timeout or a missing Python interpreter), never the raw command.
+function subprocessErrorDetail(
+	error: Error & { killed?: boolean; signal?: string; code?: string | number },
+	stderr: string
+): string {
+	const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]'));
+	const traceback = lines.filter((l) => !l.startsWith('[filedrop]'));
+	const parts = [...diagnostics];
+	if (traceback.length) parts.push(traceback[traceback.length - 1]);
+	if (parts.length) return parts.join('\n');
+
+	if (error.killed || error.signal === 'SIGTERM') {
+		return 'The conversion process timed out before finishing.';
+	}
+	if (error.code === 'ENOENT') {
+		return 'Python could not be started — check the Python command in FileDrop settings.';
+	}
+	return 'The conversion process exited unexpectedly without any error output.';
+}
+
 // Executables carry no extractable text, so ask the LLM what the file most
 // likely is from its name. The reply is an educated guess, flagged as such.
 function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
@@ -110,7 +136,7 @@ export async function runMarkitdown(
 							return;
 						}
 						new Notice('FileDrop: LLM conversion failed — see note body for details.');
-						resolve(conversionErrorBody('LLM conversion failed', error.message));
+						resolve(conversionErrorBody('LLM conversion failed', subprocessErrorDetail(error, stderr)));
 						return;
 					}
 					if (!stdout.trim()) {
@@ -141,7 +167,7 @@ export async function runMarkitdown(
 						return;
 					}
 					new Notice('FileDrop: markitdown failed — see note body for details.');
-					resolve(conversionErrorBody('markitdown conversion failed', error.message));
+					resolve(conversionErrorBody('markitdown conversion failed', subprocessErrorDetail(error, stderr)));
 					return;
 				}
 				if (!stdout.trim()) {
@@ -215,11 +241,11 @@ export async function runMsgConversion(
 			pythonCommand,
 			['-c', msgScript, absolutePath],
 			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
-			(error: Error | null, stdout: string) => {
+			(error: Error | null, stdout: string, stderr: string) => {
 				if (error) {
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({
-						body: conversionErrorBody('MSG extraction failed', error.message),
+						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr)),
 						attachments: [],
 					});
 					return;

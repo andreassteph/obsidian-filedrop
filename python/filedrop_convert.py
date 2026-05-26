@@ -94,14 +94,12 @@ def convert(path, env):
         if result and result.strip():
             return result
     except Exception as exc:
-        print(f"[filedrop] markitdown step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        print(f"[filedrop] markitdown LLM step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
-            # LLM-enhanced conversion failed (e.g. PPTX slide with no embedded image).
-            # Retry without LLM — text content is still extracted.
-            plain_result = MarkItDown().convert(path).text_content
-            if plain_result and plain_result.strip():
-                return plain_result
-            return ""
+            # The LLM-enhanced step failed for a non-PDF (e.g. a PPTX markitdown
+            # could not fully process). Keep the plain markitdown conversion so
+            # the file's extractable text is still captured.
+            return _convert_without_llm(path)
 
     # For PDFs that produced nothing (scanned / image-only), render each page
     # via PyMuPDF and OCR with the LLM.
@@ -110,6 +108,20 @@ def convert(path, env):
         if result:
             return result
 
+    return ""
+
+
+def _convert_without_llm(path):
+    """Re-run markitdown with no LLM client so a file's extractable text is still
+    captured when the LLM-enhanced step fails. Returns the plain text, or "" if
+    even this fails — never raises, so a failure here can't crash the process and
+    dump the whole invocation into the note."""
+    try:
+        result = MarkItDown().convert(path).text_content
+        if result and result.strip():
+            return result
+    except Exception as exc:
+        print(f"[filedrop] plain markitdown fallback failed: {type(exc).__name__}: {exc}", file=sys.stderr)
     return ""
 
 
