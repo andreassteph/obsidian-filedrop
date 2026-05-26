@@ -1,4 +1,4 @@
-import { Plugin, TFile, normalizePath } from 'obsidian';
+import { Notice, Plugin, TFile, normalizePath } from 'obsidian';
 
 import {
 	DEFAULT_SETTINGS,
@@ -12,12 +12,17 @@ import {
 	suggestTags,
 } from './src/settings';
 import { runMarkitdown, runMsgConversion } from './src/convert';
-import { getMonthSlug } from './src/utils';
+import { dedupeName, getMonthSlug, noteNameFromFile } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { join: pathJoin } = require('path') as typeof import('path');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { createHash } = require('crypto') as typeof import('crypto');
+
+const sha256 = (buf: ArrayBuffer): string =>
+	createHash('sha256').update(Buffer.from(buf)).digest('hex');
 
 export default class FileDropPlugin extends Plugin {
 	settings: FileDropSettings;
@@ -72,8 +77,24 @@ export default class FileDropPlugin extends Plugin {
 		await this.ensureDir(normalizePath(`${this.settings.incomingDir}/${monthSlug}`));
 		await this.ensureDir(subfolderPath);
 
-		const rawFilePath = normalizePath(`${subfolderPath}/${file.name}`);
 		const buffer = await file.arrayBuffer();
+		const newHash = sha256(buffer);
+
+		// Resolve a raw-file name before writing: skip identical re-drops, and
+		// give a differing same-named drop a unique name so both coexist.
+		let rawName = file.name;
+		let rawFilePath = normalizePath(`${subfolderPath}/${rawName}`);
+		let dupIndex = 1;
+		while (await vault.adapter.exists(rawFilePath)) {
+			const existing = await vault.adapter.readBinary(rawFilePath);
+			if (sha256(existing) === newHash) {
+				new Notice('Already imported — skipped');
+				return;
+			}
+			dupIndex++;
+			rawName = dedupeName(file.name, dupIndex);
+			rawFilePath = normalizePath(`${subfolderPath}/${rawName}`);
+		}
 		await vault.adapter.writeBinary(rawFilePath, buffer);
 
 		const basePath: string | undefined = (vault.adapter as any).basePath;
@@ -93,7 +114,7 @@ export default class FileDropPlugin extends Plugin {
 			const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
 
 			if (msgResult.attachments.length > 0) {
-				const attDirName = `${file.name}.attachments`;
+				const attDirName = `${rawName}.attachments`;
 				const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
 				await this.ensureDir(attDirPath);
 
@@ -120,20 +141,12 @@ export default class FileDropPlugin extends Plugin {
 		const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
 		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
 
-		// Find a unique note path for duplicate drops
-		const baseNote = normalizePath(`${subfolderPath}/${file.name}.md`);
-		let notePath = baseNote;
-		if (await vault.adapter.exists(notePath)) {
-			let i = 2;
-			while (await vault.adapter.exists(normalizePath(`${subfolderPath}/${file.name}-${i}.md`))) {
-				i++;
-			}
-			notePath = normalizePath(`${subfolderPath}/${file.name}-${i}.md`);
-		}
+		// The raw name is already unique, so the derived note name is too.
+		const notePath = normalizePath(`${subfolderPath}/${noteNameFromFile(rawName)}.md`);
 
 		const frontmatterLines = [
 			'---',
-			`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
+			`original-file: "[[${monthSlug}/${category}/${rawName}]]"`,
 			'processed: false',
 			'verified: false',
 			`tags: ${JSON.stringify(mergedTags)}`,
@@ -148,7 +161,7 @@ export default class FileDropPlugin extends Plugin {
 		await vault.create(notePath, noteContent);
 
 		const entry: DroppedFile = {
-			filename: file.name,
+			filename: rawName,
 			filePath: rawFilePath,
 			notePath,
 			tags: [...mergedTags],
