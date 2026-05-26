@@ -55,12 +55,20 @@ def _install_thinking_filter(client):
     return client
 
 
-def build_converter(env):
-    client = OpenAI(
-        api_key=env["FILEDROP_LLM_KEY"],
+def _make_client(env, **kwargs):
+    # x-api-key is sent alongside the SDK's automatic Authorization: Bearer header
+    # because the Siemens gateway requires it; other providers ignore it.
+    key = env["FILEDROP_LLM_KEY"]
+    return OpenAI(
+        api_key=key,
         base_url=env.get("FILEDROP_LLM_URL") or None,
-        timeout=720,
+        default_headers={"x-api-key": key},
+        **kwargs,
     )
+
+
+def build_converter(env):
+    client = _make_client(env, timeout=720)
     _install_thinking_filter(client)
     kwargs = {"llm_client": client, "llm_model": env["FILEDROP_LLM_MODEL"]}
     prompt = env.get("FILEDROP_LLM_PROMPT")
@@ -108,10 +116,7 @@ def _convert_pdf_pages_with_llm(path, env):
     except ImportError:
         return ""
 
-    client = OpenAI(
-        api_key=env["FILEDROP_LLM_KEY"],
-        base_url=env.get("FILEDROP_LLM_URL") or None,
-    )
+    client = _make_client(env)
     _install_thinking_filter(client)
 
     prompt = (
@@ -163,10 +168,7 @@ DEFAULT_DESCRIBE_PROMPT = (
 
 def describe(path, env):
     """Ask the LLM what a file likely is, given only its filename."""
-    client = OpenAI(
-        api_key=env["FILEDROP_LLM_KEY"],
-        base_url=env.get("FILEDROP_LLM_URL") or None,
-    )
+    client = _make_client(env)
     _install_thinking_filter(client)
     filename = os.path.basename(path)
     prompt = (env.get("FILEDROP_DESCRIBE_PROMPT") or DEFAULT_DESCRIBE_PROMPT).format(filename=filename)

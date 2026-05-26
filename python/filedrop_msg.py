@@ -63,7 +63,9 @@ def _build_markitdown(env):
     if url and key and model:
         from openai import OpenAI
         from markitdown import MarkItDown
-        client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None, timeout=720))
+        client = _install_thinking_filter(
+            OpenAI(api_key=key, base_url=url or None, timeout=720, default_headers={"x-api-key": key})
+        )
         kwargs = {"llm_client": client, "llm_model": model}
         prompt = env.get("FILEDROP_LLM_PROMPT")
         if prompt:
@@ -99,7 +101,9 @@ def _convert_pdf_pages_with_llm(path, env):
     if not doc.page_count:
         return None
 
-    client = _install_thinking_filter(OpenAI(api_key=key, base_url=url or None))
+    client = _install_thinking_filter(
+        OpenAI(api_key=key, base_url=url or None, default_headers={"x-api-key": key})
+    )
     prompt = (
         env.get("FILEDROP_LLM_PROMPT")
         or "Transcribe all text visible on this page exactly as it appears. "

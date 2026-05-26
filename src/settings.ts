@@ -160,6 +160,39 @@ export function isGatewayUrlSecure(url: string): boolean {
 	return gatewayUrlIssue(url) === null;
 }
 
+function collectModelIds(node: unknown, out: string[]): void {
+	if (typeof node === 'string') {
+		if (node.length > 0) out.push(node);
+		return;
+	}
+	if (!node || typeof node !== 'object') return;
+	const o = node as Record<string, unknown>;
+	// Catalog entry (e.g. Siemens gateway): model names live in a nested `models` list.
+	if (Array.isArray(o.models)) {
+		for (const m of o.models) collectModelIds(m, out);
+		return;
+	}
+	// Leaf model object: OpenAI uses `id`; others use `name`/`model`.
+	const id = o.id ?? o.name ?? o.model;
+	if (typeof id === 'string' && id.length > 0) out.push(id);
+}
+
+// Gateways disagree on the /models shape: OpenAI returns `{ data: [{ id }] }`,
+// Ollama/Google-style return `{ models: [...] }`, and the Siemens gateway returns
+// a top-level array of provider entries each carrying a nested `models` list.
+export function extractModelIds(json: unknown): string[] {
+	const arr: unknown[] = Array.isArray(json)
+		? json
+		: Array.isArray((json as Record<string, unknown>)?.data)
+		? ((json as Record<string, unknown>).data as unknown[])
+		: Array.isArray((json as Record<string, unknown>)?.models)
+		? ((json as Record<string, unknown>).models as unknown[])
+		: [];
+	const out: string[] = [];
+	for (const item of arr) collectModelIds(item, out);
+	return Array.from(new Set(out)).sort();
+}
+
 export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
 	if (!gw.baseUrl || !gw.apiKey) {
 		new Notice('FileDrop: set the gateway URL and API key before refreshing models.');
@@ -174,14 +207,11 @@ export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
 	try {
 		const res = await requestUrl({
 			url: modelsUrl,
-			headers: { Authorization: `Bearer ${gw.apiKey}` },
+			headers: { Authorization: `Bearer ${gw.apiKey}`, 'x-api-key': gw.apiKey },
 		});
-		const data = (res.json?.data ?? []) as { id?: string }[];
-		return data
-			.map((m) => m.id)
-			.filter((id): id is string => typeof id === 'string')
-			.sort();
-	} catch {
+		return extractModelIds(res.json);
+	} catch (err) {
+		console.error('FileDrop: failed to fetch models from', modelsUrl, err);
 		new Notice('FileDrop: could not fetch models from the gateway.');
 		return [];
 	}
@@ -286,6 +316,7 @@ export async function suggestTags(
 		throw: false,
 		headers: {
 			Authorization: `Bearer ${gateway.apiKey}`,
+			'x-api-key': gateway.apiKey,
 			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify({
@@ -352,6 +383,7 @@ export async function summarizeContent(
 		throw: false,
 		headers: {
 			Authorization: `Bearer ${gateway.apiKey}`,
+			'x-api-key': gateway.apiKey,
 			'Content-Type': 'application/json',
 		},
 		body: JSON.stringify({

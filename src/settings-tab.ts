@@ -325,6 +325,21 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Manual model entry — fallback when the model list can't be fetched.
+		new Setting(wrapperEl)
+			.setName('Model (manual)')
+			.setDesc("Fallback if the model list can't be fetched — type the exact model ID.")
+			.addText((text) =>
+				text
+					.setPlaceholder('e.g. gpt-4o')
+					.setValue(gw.model)
+					.onChange(async (value) => {
+						this.plugin.settings.llmGateways[idx].model = value.trim();
+						await this.plugin.saveSettings();
+						this.plugin.getActiveView()?.refreshModelSelector();
+					})
+			);
+
 		// Prompt
 		new Setting(wrapperEl)
 			.setName('Image description prompt')
