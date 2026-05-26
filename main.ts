@@ -259,6 +259,97 @@ export default class FileDropPlugin extends Plugin {
 		}
 	}
 
+	async updateFileList(): Promise<void> {
+		const { vault, metadataCache } = this.app;
+		const incomingDir = normalizePath(this.settings.incomingDir);
+		if (!(await vault.adapter.exists(incomingDir))) {
+			new Notice('FileDrop: incoming folder does not exist.');
+			return;
+		}
+
+		const trackedNotePaths = new Set(this.recentFiles.map((e) => e.notePath));
+		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
+		let added = 0;
+
+		// Pick up untracked .md filedrop notes (verified or not)
+		const mdFiles = vault.getMarkdownFiles().filter((f) =>
+			f.path.startsWith(incomingDir + '/')
+		);
+		for (const file of mdFiles) {
+			if (trackedNotePaths.has(file.path)) continue;
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm || !fm['original-file']) continue;
+
+			const linkMatch = String(fm['original-file']).match(/\[\[(.+?)\]\]/);
+			const relPath = linkMatch ? linkMatch[1] : '';
+			const filePath = relPath ? normalizePath(`${incomingDir}/${relPath}`) : '';
+			const filename = relPath ? (relPath.split('/').pop() ?? file.name) : file.name;
+			const pathParts = relPath.split('/');
+			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
+
+			this.recentFiles.push({
+				filename,
+				filePath,
+				notePath: file.path,
+				tags: Array.isArray(fm.tags) ? fm.tags : [],
+				category,
+				droppedAt: file.stat.ctime,
+				verified: fm.verified === true,
+			});
+			trackedNotePaths.add(file.path);
+			trackedFilePaths.add(filePath);
+			added++;
+		}
+
+		// Find raw files without a tracked .md — create stub + add to filelist
+		const rawFiles = vault.getFiles().filter((f) =>
+			f.path.startsWith(incomingDir + '/') &&
+			!f.path.endsWith('.md') &&
+			!f.path.includes('.attachments/')
+		);
+		for (const file of rawFiles) {
+			if (trackedFilePaths.has(file.path)) continue;
+			const dir = file.path.slice(0, file.path.lastIndexOf('/'));
+			const notePath = normalizePath(`${dir}/${noteNameFromFile(file.name)}.md`);
+			if (trackedNotePaths.has(notePath)) continue;
+
+			const pathParts = file.path.slice(incomingDir.length + 1).split('/');
+			const monthSlug = pathParts[0] ?? '';
+			const category = pathParts.length >= 3 ? pathParts[1] : 'default';
+
+			if (!(await vault.adapter.exists(notePath))) {
+				await vault.create(notePath, [
+					'---',
+					`original-file: "[[${monthSlug}/${category}/${file.name}]]"`,
+					'processed: false',
+					'verified: false',
+					'tags: []',
+					'---',
+					'',
+				].join('\n'));
+			}
+
+			this.recentFiles.push({
+				filename: file.name,
+				filePath: file.path,
+				notePath,
+				tags: [],
+				category,
+				droppedAt: file.stat.ctime,
+				verified: false,
+			});
+			trackedNotePaths.add(notePath);
+			trackedFilePaths.add(file.path);
+			added++;
+		}
+
+		this.recentFiles.sort((a, b) => b.droppedAt - a.droppedAt);
+		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
+		await this.saveSettings();
+		this.getActiveView()?.renderFileList();
+		new Notice(`FileDrop: filelist updated — ${added} file(s) added.`);
+	}
+
 	private async ensureDir(path: string): Promise<void> {
 		if (!(await this.app.vault.adapter.exists(path))) {
 			await this.app.vault.adapter.mkdir(path);

@@ -38,6 +38,14 @@
   border-color: var(--interactive-accent);
 }
 
+/* Update filelist button */
+
+.filedrop-update-row {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+}
+
 /* Drop zone */
 
 .filedrop-zone {
@@ -203,6 +211,7 @@
   gap: 6px;
 }
 
+.filedrop-update-btn,
 .filedrop-entry-summary,
 .filedrop-entry-suggest-tags {
   font-size: var(--font-ui-smaller);
@@ -216,12 +225,14 @@
   box-shadow: none;
 }
 
+.filedrop-update-btn:hover,
 .filedrop-entry-summary:hover,
 .filedrop-entry-suggest-tags:hover {
   color: var(--interactive-accent);
   border-color: var(--interactive-accent);
 }
 
+.filedrop-update-btn:disabled,
 .filedrop-entry-summary:disabled,
 .filedrop-entry-suggest-tags:disabled {
   opacity: 0.5;

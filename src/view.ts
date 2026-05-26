@@ -47,6 +47,23 @@ export class FileDropView extends ItemView {
 			this.selectedGatewayId = this.modelSelectEl!.value || null;
 		});
 
+		// Update filelist button
+		const updateRow = container.createDiv({ cls: 'filedrop-update-row' });
+		const updateBtn = updateRow.createEl('button', {
+			cls: 'filedrop-update-btn',
+			text: '↻ Update filelist',
+		});
+		updateBtn.addEventListener('click', async () => {
+			updateBtn.disabled = true;
+			updateBtn.setText('Scanning…');
+			try {
+				await this.plugin.updateFileList();
+			} finally {
+				updateBtn.disabled = false;
+				updateBtn.setText('↻ Update filelist');
+			}
+		});
+
 		// Drop zone
 		const dropZone = container.createDiv({ cls: 'filedrop-zone' });
 		dropZone.createDiv({ cls: 'filedrop-icon' });
