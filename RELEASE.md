@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.1.16 — Fix file naming, add tag suggestions button, and improve error handling
+
+### Changes
+
+- Fix double-extension note names and deduplicate drops by content hash
+- Add on-demand "Suggest tags" button to file entries for flexible tagging
+- Improve error handling: surface silent PDF conversion failures and add fallback for LLM conversion errors
+- Increase subprocess buffer to 200 MB for large file conversions
+
 ## 0.1.15 — Fix API header capitalization for LLM requests
 
 ### Changes
