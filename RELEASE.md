@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.17 — Fix YAML frontmatter corruption and improve PowerPoint error handling
+
+### Changes
+
+- Fix frontmatter tags corruption when rewriting YAML block lists
+- Keep markitdown text as fallback when LLM conversion fails for PowerPoint files
+- Improve error message cleanup to prevent dumped errors in logs
+
 ## 0.1.16 — Fix file naming, add tag suggestions button, and improve error handling
 
 ### Changes
