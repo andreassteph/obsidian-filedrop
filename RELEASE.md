@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.18 — Add sidebar refresh button and improve .msg conversion
+
+### Changes
+
+- Add "Update Filelist" button to sidebar for manual refresh
+- Fix .msg file conversion to match main conversion logic
+- Mark plugin as desktop-only in manifest
+
 ## 0.1.17 — Fix YAML frontmatter corruption and improve PowerPoint error handling
 
 ### Changes
