@@ -42,6 +42,8 @@ export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
 	custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', keyPlaceholder: 'sk-…' },
 };
 
+export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified';
+
 export interface DroppedFile {
 	filename: string;
 	filePath: string;   // vault-relative path to raw file
@@ -50,6 +52,7 @@ export interface DroppedFile {
 	category: string;
 	droppedAt: number;
 	verified?: boolean;
+	status?: FileDropStatus;
 }
 
 export interface PluginData {
