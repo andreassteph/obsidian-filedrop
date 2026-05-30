@@ -95,125 +95,153 @@ export default class FileDropPlugin extends Plugin {
 			rawName = dedupeName(file.name, dupIndex);
 			rawFilePath = normalizePath(`${subfolderPath}/${rawName}`);
 		}
-		await vault.adapter.writeBinary(rawFilePath, buffer);
-
-		const basePath: string | undefined = (vault.adapter as any).basePath;
-		const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-		const gateway = gatewayId
-			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
-			: null;
-
-		const isMsgFile =
-			file.name.toLowerCase().endsWith('.msg') ||
-			file.type === 'application/vnd.ms-outlook' ||
-			file.type === 'application/x-msg';
-		let markdownBody: string;
-		const attachmentFrontmatterLines: string[] = [];
-
-		if (isMsgFile) {
-			const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
-
-			if (msgResult.attachments.length > 0) {
-				const attDirName = `${rawName}.attachments`;
-				const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
-				await this.ensureDir(attDirPath);
-
-				for (const att of msgResult.attachments) {
-					const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
-					const attBuf = Buffer.from(att.dataB64, 'base64');
-					const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-					await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
-					attachmentFrontmatterLines.push(`  - "[[${monthSlug}/${category}/${attDirName}/${att.filename}]]"`);
-				}
-			}
-
-			const bodyParts: string[] = [msgResult.body];
-			for (const att of msgResult.attachments) {
-				if (att.markdown) {
-					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-				}
-			}
-			markdownBody = bodyParts.join('\n\n');
-		} else {
-			markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
-		}
-
-		const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
-		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
-
 		// The raw name is already unique, so the derived note name is too.
 		const notePath = normalizePath(`${subfolderPath}/${noteNameFromFile(rawName)}.md`);
 
-		const frontmatterLines = [
-			'---',
-			`original-file: "[[${monthSlug}/${category}/${rawName}]]"`,
-			'processed: false',
-			'verified: false',
-			`tags: ${JSON.stringify(mergedTags)}`,
-		];
-		if (attachmentFrontmatterLines.length > 0) {
-			frontmatterLines.push('attachments:');
-			frontmatterLines.push(...attachmentFrontmatterLines);
-		}
-		frontmatterLines.push('---', '', markdownBody);
-
-		const noteContent = frontmatterLines.join('\n');
-		await vault.create(notePath, noteContent);
-
+		// Insert placeholder immediately so the file appears in the list before
+		// any I/O starts. Not persisted yet — no stale entry survives a restart.
 		const entry: DroppedFile = {
 			filename: rawName,
 			filePath: rawFilePath,
 			notePath,
-			tags: [...mergedTags],
+			tags: [],
 			category,
 			droppedAt: Date.now(),
 			verified: false,
+			status: 'moving',
 		};
 		this.recentFiles.unshift(entry);
 		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
-		await this.saveSettings();
 		this.getActiveView()?.renderFileList();
+
+		try {
+			await vault.adapter.writeBinary(rawFilePath, buffer);
+
+			// File stored — switch to 'converting' before running markitdown
+			entry.status = 'converting';
+			this.getActiveView()?.renderFileList();
+
+			const basePath: string | undefined = (vault.adapter as any).basePath;
+			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
+			const gateway = gatewayId
+				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+				: null;
+
+			const isMsgFile =
+				file.name.toLowerCase().endsWith('.msg') ||
+				file.type === 'application/vnd.ms-outlook' ||
+				file.type === 'application/x-msg';
+			let markdownBody: string;
+			const attachmentFrontmatterLines: string[] = [];
+
+			if (isMsgFile) {
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+
+				if (msgResult.attachments.length > 0) {
+					const attDirName = `${rawName}.attachments`;
+					const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
+					await this.ensureDir(attDirPath);
+
+					for (const att of msgResult.attachments) {
+						const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
+						const attBuf = Buffer.from(att.dataB64, 'base64');
+						const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+						await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
+						attachmentFrontmatterLines.push(`  - "[[${monthSlug}/${category}/${attDirName}/${att.filename}]]"`);
+					}
+				}
+
+				const bodyParts: string[] = [msgResult.body];
+				for (const att of msgResult.attachments) {
+					if (att.markdown) {
+						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					}
+				}
+				markdownBody = bodyParts.join('\n\n');
+			} else {
+				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+			}
+
+			const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+
+			const frontmatterLines = [
+				'---',
+				`original-file: "[[${monthSlug}/${category}/${rawName}]]"`,
+				'processed: false',
+				'verified: false',
+				`tags: ${JSON.stringify(mergedTags)}`,
+			];
+			if (attachmentFrontmatterLines.length > 0) {
+				frontmatterLines.push('attachments:');
+				frontmatterLines.push(...attachmentFrontmatterLines);
+			}
+			frontmatterLines.push('---', '', markdownBody);
+
+			await vault.create(notePath, frontmatterLines.join('\n'));
+
+			entry.tags = [...mergedTags];
+			entry.status = 'converted';
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+		} catch (e) {
+			const idx = this.recentFiles.indexOf(entry);
+			if (idx >= 0) this.recentFiles.splice(idx, 1);
+			this.getActiveView()?.renderFileList();
+			new Notice(`FileDrop: conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+		}
 	}
 
 	async rerunConversion(entry: DroppedFile, gatewayId: string | null): Promise<void> {
 		const { vault } = this.app;
-		const basePath: string | undefined = (vault.adapter as any).basePath;
-		const absolutePath = basePath ? pathJoin(basePath, entry.filePath) : entry.filePath;
-		const gateway = gatewayId
-			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
-			: null;
 
-		const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
-		let newBody: string;
-
-		if (isMsgFile) {
-			const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
-			const bodyParts: string[] = [msgResult.body];
-			for (const att of msgResult.attachments) {
-				if (att.markdown) {
-					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-				}
-			}
-			newBody = bodyParts.join('\n\n');
-		} else {
-			newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
-		}
-
-		const noteFile = vault.getAbstractFileByPath(entry.notePath);
-		if (!(noteFile instanceof TFile)) return;
-		const content = await vault.read(noteFile);
-		const closingIdx = content.indexOf('\n---\n');
-		if (closingIdx < 0) return;
-
-		const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
-		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
-		const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
-
-		await vault.modify(noteFile, frontmatter + '\n' + newBody);
-
-		entry.tags = [...mergedTags];
-		await this.saveSettings();
+		entry.status = 'converting';
 		this.getActiveView()?.renderFileList();
+
+		try {
+			const basePath: string | undefined = (vault.adapter as any).basePath;
+			const absolutePath = basePath ? pathJoin(basePath, entry.filePath) : entry.filePath;
+			const gateway = gatewayId
+				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+				: null;
+
+			const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
+			let newBody: string;
+
+			if (isMsgFile) {
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+				const bodyParts: string[] = [msgResult.body];
+				for (const att of msgResult.attachments) {
+					if (att.markdown) {
+						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					}
+				}
+				newBody = bodyParts.join('\n\n');
+			} else {
+				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+			}
+
+			const noteFile = vault.getAbstractFileByPath(entry.notePath);
+			if (!(noteFile instanceof TFile)) return;
+			const content = await vault.read(noteFile);
+			const closingIdx = content.indexOf('\n---\n');
+			if (closingIdx < 0) return;
+
+			const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+			const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
+
+			await vault.modify(noteFile, frontmatter + '\n' + newBody);
+
+			entry.tags = [...mergedTags];
+			entry.status = 'converted';
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+		} catch (e) {
+			entry.status = 'converted';
+			this.getActiveView()?.renderFileList();
+			new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+		}
 	}
 
 	async syncIncomingFolder(): Promise<void> {

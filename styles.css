@@ -343,6 +343,40 @@
   text-overflow: ellipsis;
 }
 
+/* Conversion status badge */
+
+.filedrop-status {
+  font-size: var(--font-ui-smaller);
+  border-radius: 3px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  font-weight: 500;
+  text-transform: lowercase;
+}
+
+.filedrop-status--moving {
+  color: var(--text-warning);
+  animation: filedrop-pulse 1.4s ease-in-out infinite;
+}
+
+.filedrop-status--converting {
+  color: var(--text-warning);
+  animation: filedrop-pulse 1.4s ease-in-out infinite;
+}
+
+.filedrop-status--converted {
+  color: var(--color-green);
+}
+
+.filedrop-status--verified {
+  color: var(--text-muted);
+}
+
+@keyframes filedrop-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.35; }
+}
+
 .filedrop-pip-output {
   font-family: var(--font-monospace);
   font-size: var(--font-ui-smaller);

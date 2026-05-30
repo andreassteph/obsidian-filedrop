@@ -129,7 +129,7 @@ export class FileDropView extends ItemView {
 
 		const unverified = this.plugin.recentFiles
 			.map((entry, index) => ({ entry, index }))
-			.filter(({ entry }) => !entry.verified);
+			.filter(({ entry }) => !entry.verified && entry.status !== 'verified');
 
 		if (unverified.length === 0) {
 			this.fileListEl.createEl('p', { cls: 'filedrop-empty', text: 'No files yet.' });
@@ -163,10 +163,16 @@ export class FileDropView extends ItemView {
 			this.app.workspace.openLinkText(entry.notePath, '', false);
 		});
 
+		const status = entry.status ?? 'converted';
+		headerRow.createEl('span', { cls: `filedrop-status filedrop-status--${status}`, text: status });
+
+		const inProgress = status === 'moving' || status === 'converting';
+
 		const verifiedLabel = headerRow.createEl('label', { cls: 'filedrop-verified-label' });
 		const verifiedCheckbox = verifiedLabel.createEl('input', { cls: 'filedrop-verified-checkbox' });
 		verifiedCheckbox.type = 'checkbox';
 		verifiedCheckbox.checked = false;
+		verifiedCheckbox.disabled = inProgress;
 		verifiedLabel.appendText('verified');
 		verifiedCheckbox.addEventListener('change', async () => {
 			if (verifiedCheckbox.checked) await this.markVerified(index);
@@ -177,20 +183,15 @@ export class FileDropView extends ItemView {
 
 		const rerunBtn = headerRow.createEl('button', { cls: 'filedrop-entry-rerun', text: '↺' });
 		rerunBtn.title = 'Re-run conversion';
+		rerunBtn.disabled = inProgress;
 		rerunBtn.addEventListener('click', async () => {
-			rerunBtn.disabled = true;
-			rerunBtn.setText('…');
-			try {
-				await this.plugin.rerunConversion(entry, this.selectedGatewayId);
-			} finally {
-				rerunBtn.disabled = false;
-				rerunBtn.setText('↺');
-			}
+			await this.plugin.rerunConversion(entry, this.selectedGatewayId);
 		});
 
 		const summaryRow = entryEl.createDiv({ cls: 'filedrop-entry-summary-row' });
 		const summaryBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-summary', text: 'Add summary' });
 		summaryBtn.title = 'Generate summary with the selected LLM';
+		summaryBtn.disabled = inProgress;
 		summaryBtn.addEventListener('click', async () => {
 			summaryBtn.disabled = true;
 			summaryBtn.setText('Summarizing…');
@@ -204,6 +205,7 @@ export class FileDropView extends ItemView {
 
 		const suggestBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-suggest-tags', text: 'Suggest tags' });
 		suggestBtn.title = 'Suggest tags with the selected LLM';
+		suggestBtn.disabled = inProgress;
 		suggestBtn.addEventListener('click', async () => {
 			suggestBtn.disabled = true;
 			suggestBtn.setText('Suggesting…');
@@ -258,6 +260,7 @@ export class FileDropView extends ItemView {
 
 	private async markVerified(index: number): Promise<void> {
 		this.plugin.recentFiles[index].verified = true;
+		this.plugin.recentFiles[index].status = 'verified';
 		await this.plugin.saveSettings();
 		await this.rewriteNoteVerified(this.plugin.recentFiles[index].notePath);
 		this.renderFileList();
