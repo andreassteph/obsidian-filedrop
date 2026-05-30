@@ -13,37 +13,48 @@ export type OnPhase = (phase: ConvertPhase) => void;
 // Run a subprocess, streaming stderr live so we can forward `[filedrop:phase]`
 // markers to the caller, while still buffering the full stdout/stderr for the
 // completion callback. Mirrors execFile's callback shape.
+type KillReason = 'timeout' | 'maxBuffer' | undefined;
+type SubprocessError = Error & {
+	killed?: boolean;
+	signal?: string;
+	code?: string | number;
+	reason?: KillReason;
+};
+
 function runWithPhases(
 	cmd: string,
 	args: string[],
 	options: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 	onPhase: OnPhase | undefined,
-	done: (error: (Error & { killed?: boolean; signal?: string; code?: string | number }) | null, stdout: string, stderr: string) => void,
+	done: (error: SubprocessError | null, stdout: string, stderr: string) => void,
 ): void {
 	let stdout = '';
 	let stderr = '';
 	let stderrLine = '';
-	let killedByTimeout = false;
+	let killReason: KillReason;
 	const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
 
 	let child: ReturnType<typeof spawn>;
 	try {
 		child = spawn(cmd, args, { env: options.env });
 	} catch (err) {
-		done(err as Error & { code?: string | number }, '', '');
+		done(err as SubprocessError, '', '');
 		return;
 	}
 
 	const timer = options.timeout
 		? setTimeout(() => {
-			killedByTimeout = true;
+			killReason = 'timeout';
 			child.kill('SIGTERM');
 		}, options.timeout)
 		: null;
 
 	child.stdout?.on('data', (chunk: Buffer) => {
 		stdout += chunk.toString('utf8');
-		if (stdout.length > maxBuffer) child.kill('SIGTERM');
+		if (stdout.length > maxBuffer) {
+			killReason = killReason ?? 'maxBuffer';
+			child.kill('SIGTERM');
+		}
 	});
 
 	child.stderr?.on('data', (chunk: Buffer) => {
@@ -61,7 +72,7 @@ function runWithPhases(
 
 	child.on('error', (err: Error & { code?: string }) => {
 		if (timer) clearTimeout(timer);
-		done(err, stdout, stderr);
+		done(err as SubprocessError, stdout, stderr);
 	});
 
 	child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
@@ -70,8 +81,9 @@ function runWithPhases(
 			done(null, stdout, stderr);
 			return;
 		}
-		const err = new Error(`Command failed: ${cmd}\n${stderr}`) as Error & { killed?: boolean; signal?: string; code?: string | number };
-		err.killed = killedByTimeout;
+		const err = new Error(`Command failed: ${cmd}\n${stderr}`) as SubprocessError;
+		err.killed = killReason === 'timeout';
+		err.reason = killReason;
 		err.signal = signal ?? undefined;
 		err.code = code ?? undefined;
 		done(err, stdout, stderr);
@@ -79,9 +91,16 @@ function runWithPhases(
 }
 
 const MARKITDOWN_TIMEOUT_MS = 30_000;
-const LLM_TIMEOUT_MS = 180_000;
+// Per-LLM-request budget enforced inside Python (httpx). Keep this below the
+// Node-side subprocess cap so a stuck request fails with a precise Python
+// error message before Node SIGTERMs the whole subprocess.
+const PYTHON_LLM_TIMEOUT_S = 150;
+// Node-side subprocess caps. Add headroom over PYTHON_LLM_TIMEOUT_S so a
+// single slow-but-eventually-finishing request doesn't get killed mid-flight.
+const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
 // MSG conversion runs body + every attachment through the LLM sequentially,
-// so scanned PDFs with many pages need a much larger budget.
+// so scanned PDFs with many pages need a much larger overall budget — but
+// each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
 const MSG_LLM_TIMEOUT_MS = 720_000;
 
 // The binary/executable family markitdown reports as unsupported.
@@ -116,17 +135,29 @@ function unsupportedFormatDetail(message: string): string | null {
 // the real exception — and fall back to a short reason when there is no stderr
 // (e.g. a timeout or a missing Python interpreter), never the raw command.
 function subprocessErrorDetail(
-	error: Error & { killed?: boolean; signal?: string; code?: string | number },
+	error: SubprocessError,
 	stderr: string
 ): string {
+	// A timeout-killed Python process produces a SIGTERM mid-stream — any
+	// stderr from before the kill is partial and misleading, so report the
+	// timeout directly instead of surfacing it.
+	if (error.reason === 'timeout' || error.killed) {
+		return 'The conversion process timed out before finishing.';
+	}
+	if (error.reason === 'maxBuffer') {
+		return 'The conversion process produced more output than the buffer could hold.';
+	}
+
 	const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
-	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]'));
-	const traceback = lines.filter((l) => !l.startsWith('[filedrop]'));
+	// `[filedrop]` is our diagnostic prefix; `[filedrop:phase]` is the live
+	// progress marker for the status pill — surface the former, drop the latter.
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+	const traceback = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
 	const parts = [...diagnostics];
 	if (traceback.length) parts.push(traceback[traceback.length - 1]);
 	if (parts.length) return parts.join('\n');
 
-	if (error.killed || error.signal === 'SIGTERM') {
+	if (error.signal === 'SIGTERM') {
 		return 'The conversion process timed out before finishing.';
 	}
 	if (error.code === 'ENOENT') {
@@ -151,6 +182,7 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 					FILEDROP_LLM_URL: gateway?.baseUrl,
 					FILEDROP_LLM_KEY: gateway?.apiKey,
 					FILEDROP_LLM_MODEL: gateway?.model,
+					FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 				},
 			},
 			(error: Error | null, stdout: string) => {
@@ -193,6 +225,7 @@ export async function runMarkitdown(
 						FILEDROP_LLM_KEY: gateway.apiKey,
 						FILEDROP_LLM_MODEL: gateway.model,
 						FILEDROP_LLM_PROMPT: gateway.prompt,
+						FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 					},
 				},
 				onPhase,
@@ -308,6 +341,7 @@ export async function runMsgConversion(
 		env.FILEDROP_LLM_KEY = gateway.apiKey;
 		env.FILEDROP_LLM_MODEL = gateway.model;
 		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
 	}
 
 	return new Promise((resolve) => {

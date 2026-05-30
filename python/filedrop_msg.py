@@ -83,10 +83,32 @@ def _llm_configured(env):
     )
 
 
+_DEFAULT_LLM_TIMEOUT_S = 150.0
+_DEFAULT_CONNECT_TIMEOUT_S = 15.0
+
+
+def _llm_timeout(env):
+    """Bounded per-request timeout; see filedrop_convert._llm_timeout."""
+    raw = env.get("FILEDROP_LLM_TIMEOUT")
+    try:
+        total = float(raw) if raw else _DEFAULT_LLM_TIMEOUT_S
+    except (TypeError, ValueError):
+        total = _DEFAULT_LLM_TIMEOUT_S
+    try:
+        import httpx
+    except ImportError:
+        return total
+    return httpx.Timeout(total, connect=_DEFAULT_CONNECT_TIMEOUT_S)
+
+
 def _make_client(env, **kwargs):
     # x-api-key is sent alongside the SDK's automatic Authorization: Bearer header
     # because the Siemens gateway requires it; other providers ignore it.
+    # max_retries=0: the SDK's default 2 retries silently triple the wait when
+    # a gateway hangs.
     key = env["FILEDROP_LLM_KEY"]
+    kwargs.setdefault("timeout", _llm_timeout(env))
+    kwargs.setdefault("max_retries", 0)
     client = OpenAI(
         api_key=key,
         base_url=env.get("FILEDROP_LLM_URL") or None,
@@ -100,7 +122,7 @@ def _build_llm_markitdown(env):
     """MarkItDown wired to the LLM gateway, or None when no gateway is set."""
     if not _llm_configured(env):
         return None
-    kwargs = {"llm_client": _make_client(env, timeout=720), "llm_model": env["FILEDROP_LLM_MODEL"]}
+    kwargs = {"llm_client": _make_client(env), "llm_model": env["FILEDROP_LLM_MODEL"]}
     prompt = env.get("FILEDROP_LLM_PROMPT")
     if prompt:
         kwargs["llm_prompt"] = prompt

@@ -59,10 +59,41 @@ def _install_thinking_filter(client):
     return client
 
 
+_DEFAULT_LLM_TIMEOUT_S = 150.0
+_DEFAULT_CONNECT_TIMEOUT_S = 15.0
+
+
+def _llm_timeout(env):
+    """Build an httpx.Timeout from FILEDROP_LLM_TIMEOUT (seconds).
+
+    The OpenAI SDK accepts a flat number, but that applies to *every* phase
+    (connect/read/write/pool) at once — a connection that establishes but never
+    delivers bytes waits the full budget on the read. Splitting connect out
+    means a wedged gateway fails fast instead of hanging for minutes. Falls
+    back to a flat float if httpx is unavailable (which only happens in tests
+    that stub the openai package).
+    """
+    raw = env.get("FILEDROP_LLM_TIMEOUT")
+    try:
+        total = float(raw) if raw else _DEFAULT_LLM_TIMEOUT_S
+    except (TypeError, ValueError):
+        total = _DEFAULT_LLM_TIMEOUT_S
+    try:
+        import httpx
+    except ImportError:
+        return total
+    return httpx.Timeout(total, connect=_DEFAULT_CONNECT_TIMEOUT_S)
+
+
 def _make_client(env, **kwargs):
     # x-api-key is sent alongside the SDK's automatic Authorization: Bearer header
     # because the Siemens gateway requires it; other providers ignore it.
+    # max_retries=0 because the SDK's default 2 retries silently triple the
+    # wait when a gateway hangs — the user is better served by a fast clean
+    # error and the existing TS-side error handling.
     key = env["FILEDROP_LLM_KEY"]
+    kwargs.setdefault("timeout", _llm_timeout(env))
+    kwargs.setdefault("max_retries", 0)
     return OpenAI(
         api_key=key,
         base_url=env.get("FILEDROP_LLM_URL") or None,
@@ -72,7 +103,7 @@ def _make_client(env, **kwargs):
 
 
 def build_converter(env):
-    client = _make_client(env, timeout=720)
+    client = _make_client(env)
     _install_thinking_filter(client)
     kwargs = {"llm_client": client, "llm_model": env["FILEDROP_LLM_MODEL"]}
     prompt = env.get("FILEDROP_LLM_PROMPT")

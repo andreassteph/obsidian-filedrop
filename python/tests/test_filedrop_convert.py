@@ -17,12 +17,12 @@ def test_openai_base_url_none_when_url_blank():
     with patch.object(filedrop_convert, "OpenAI") as openai, \
             patch.object(filedrop_convert, "MarkItDown"):
         filedrop_convert.build_converter(dict(BASE_ENV))
-    openai.assert_called_once_with(
-        api_key="sk-test",
-        base_url=None,
-        default_headers={"x-api-key": "sk-test", "X-Api-Key": "sk-test"},
-        timeout=720,
-    )
+    _, kwargs = openai.call_args
+    assert kwargs["api_key"] == "sk-test"
+    assert kwargs["base_url"] is None
+    assert kwargs["default_headers"] == {"x-api-key": "sk-test", "X-Api-Key": "sk-test"}
+    assert kwargs["max_retries"] == 0
+    assert kwargs["timeout"] is not None
 
 
 def test_openai_base_url_uses_gateway_when_set():
@@ -30,12 +30,24 @@ def test_openai_base_url_uses_gateway_when_set():
     with patch.object(filedrop_convert, "OpenAI") as openai, \
             patch.object(filedrop_convert, "MarkItDown"):
         filedrop_convert.build_converter(env)
-    openai.assert_called_once_with(
-        api_key="sk-test",
-        base_url="https://gw.example/v1",
-        default_headers={"x-api-key": "sk-test", "X-Api-Key": "sk-test"},
-        timeout=720,
-    )
+    _, kwargs = openai.call_args
+    assert kwargs["base_url"] == "https://gw.example/v1"
+    assert kwargs["max_retries"] == 0
+
+
+def test_llm_timeout_uses_env_override():
+    env = dict(BASE_ENV, FILEDROP_LLM_TIMEOUT="42")
+    timeout = filedrop_convert._llm_timeout(env)
+    # In tests httpx is unavailable, so the helper falls back to a flat float.
+    # In production it returns httpx.Timeout(total, connect=...); accept either.
+    total = float(getattr(timeout, "read", timeout))
+    assert total == 42.0
+
+
+def test_llm_timeout_falls_back_to_default():
+    timeout = filedrop_convert._llm_timeout(dict(BASE_ENV))
+    total = float(getattr(timeout, "read", timeout))
+    assert total == filedrop_convert._DEFAULT_LLM_TIMEOUT_S
 
 
 def test_prompt_omitted_when_blank():
