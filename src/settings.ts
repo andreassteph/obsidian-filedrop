@@ -80,6 +80,7 @@ export interface DroppedFile {
 	category: string;
 	droppedAt: number;
 	verified?: boolean;
+	processed?: boolean;
 	status?: FileDropStatus;
 }
 

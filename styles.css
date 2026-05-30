@@ -70,6 +70,18 @@
   transform: rotate(-90deg);
 }
 
+.filedrop-droparea-header .filedrop-category-select {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--font-ui-small);
+  background-color: var(--background-secondary);
+  color: var(--text-normal);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 3px 6px;
+  cursor: pointer;
+}
+
 .filedrop-droparea-body {
   display: flex;
   flex-direction: column;
@@ -83,6 +95,10 @@
 }
 
 .filedrop-droparea--collapsed .filedrop-droparea-body {
+  display: none;
+}
+
+.filedrop-droparea--collapsed .filedrop-droparea-header .filedrop-category-select {
   display: none;
 }
 
@@ -177,6 +193,11 @@
   flex-direction: column;
   gap: 4px;
   flex-shrink: 0;
+}
+
+.filedrop-droparea--collapsed ~ .filedrop-recent {
+  flex: 1;
+  max-height: none;
 }
 
 .filedrop-empty {

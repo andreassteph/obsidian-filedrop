@@ -319,6 +319,17 @@ export default class FileDropPlugin extends Plugin {
 		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
 		let added = 0;
 
+		// Refresh verified/processed for already-tracked entries
+		for (const entry of this.recentFiles) {
+			const file = vault.getAbstractFileByPath(entry.notePath);
+			if (!(file instanceof TFile)) continue;
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm) continue;
+			entry.verified = fm.verified === true;
+			entry.processed = fm.processed === true;
+			if (entry.verified && entry.status !== 'verified') entry.status = 'verified';
+		}
+
 		// Pick up untracked .md filedrop notes (verified or not)
 		const mdFiles = vault.getMarkdownFiles().filter((f) =>
 			f.path.startsWith(incomingDir + '/')

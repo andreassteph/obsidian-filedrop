@@ -42,21 +42,17 @@ export class FileDropView extends ItemView {
 		const dropHeader = dropSection.createDiv({ cls: 'filedrop-droparea-header' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Drop files' });
-		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
-		dropHeader.addEventListener('click', () => {
-			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
-		});
-
-		// Category selector
-		const categoryRow = dropBody.createDiv({ cls: 'filedrop-category-row' });
-		categoryRow.createEl('label', { cls: 'filedrop-category-label', text: 'Category' });
-		const categorySelect = categoryRow.createEl('select', { cls: 'filedrop-category-select' });
+		const categorySelect = dropHeader.createEl('select', { cls: 'filedrop-category-select' });
 		this.plugin.settings.categories.forEach((cat) => {
 			const opt = categorySelect.createEl('option', { value: cat, text: cat });
 			if (cat === this.selectedCategory) opt.selected = true;
 		});
 		categorySelect.addEventListener('change', () => {
 			this.selectedCategory = categorySelect.value;
+		});
+		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
+		dropHeader.addEventListener('click', () => {
+			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
 		});
 
 		// Drop zone
@@ -153,7 +149,8 @@ export class FileDropView extends ItemView {
 		const unverified = this.plugin.recentFiles
 			.map((entry, index) => ({ entry, index }))
 			.filter(({ entry }) => !this.hiddenNotePaths.has(entry.notePath))
-			.filter(({ entry }) => this.showVerified || (!entry.verified && entry.status !== 'verified'));
+			.filter(({ entry }) => this.showVerified || (!entry.verified && entry.status !== 'verified'))
+			.filter(({ entry }) => !entry.processed);
 
 		if (unverified.length === 0) {
 			this.fileListEl.createEl('p', { cls: 'filedrop-empty', text: 'No files yet.' });
