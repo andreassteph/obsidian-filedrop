@@ -118,9 +118,14 @@ export default class FileDropPlugin extends Plugin {
 		try {
 			await vault.adapter.writeBinary(rawFilePath, buffer);
 
-			// File stored — switch to 'converting' before running markitdown
-			entry.status = 'converting';
+			// File stored — switch to markitdown phase before running it
+			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
+
+			const onPhase = (phase: 'markitdown' | 'llm-image') => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+				this.getActiveView()?.renderFileList();
+			};
 
 			const basePath: string | undefined = (vault.adapter as any).basePath;
 			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
@@ -134,9 +139,10 @@ export default class FileDropPlugin extends Plugin {
 				file.type === 'application/x-msg';
 			let markdownBody: string;
 			const attachmentFrontmatterLines: string[] = [];
+			let attachmentHadError = false;
 
 			if (isMsgFile) {
-				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 
 				if (msgResult.attachments.length > 0) {
 					const attDirName = `${rawName}.attachments`;
@@ -154,14 +160,17 @@ export default class FileDropPlugin extends Plugin {
 
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (att.markdown) {
-						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-					}
+					if (!att.markdown) continue;
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				markdownBody = bodyParts.join('\n\n');
 			} else {
-				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 			}
+
+			entry.status = 'converting-llm-tags';
+			this.getActiveView()?.renderFileList();
 
 			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
@@ -182,7 +191,7 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(markdownBody) ? 'error' : 'converted';
+			entry.status = isErrorBody(markdownBody) || attachmentHadError ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
@@ -196,7 +205,7 @@ export default class FileDropPlugin extends Plugin {
 	async rerunConversion(entry: DroppedFile, gatewayId: string | null): Promise<void> {
 		const { vault } = this.app;
 
-		entry.status = 'converting';
+		entry.status = 'converting-markitdown';
 		this.getActiveView()?.renderFileList();
 
 		try {
@@ -206,21 +215,30 @@ export default class FileDropPlugin extends Plugin {
 				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
 				: null;
 
+			const onPhase = (phase: 'markitdown' | 'llm-image') => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+				this.getActiveView()?.renderFileList();
+			};
+
 			const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
 			let newBody: string;
+			let attachmentHadError = false;
 
 			if (isMsgFile) {
-				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway);
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (att.markdown) {
-						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-					}
+					if (!att.markdown) continue;
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				newBody = bodyParts.join('\n\n');
 			} else {
-				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
+				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 			}
+
+			entry.status = 'converting-llm-tags';
+			this.getActiveView()?.renderFileList();
 
 			const noteFile = vault.getAbstractFileByPath(entry.notePath);
 			if (!(noteFile instanceof TFile)) return;
@@ -235,7 +253,7 @@ export default class FileDropPlugin extends Plugin {
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(newBody) ? 'error' : 'converted';
+			entry.status = isErrorBody(newBody) || attachmentHadError ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {

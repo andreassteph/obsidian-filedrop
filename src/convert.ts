@@ -7,10 +7,100 @@ import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
 
+export type ConvertPhase = 'markitdown' | 'llm-image';
+export type OnPhase = (phase: ConvertPhase) => void;
+
+// Run a subprocess, streaming stderr live so we can forward `[filedrop:phase]`
+// markers to the caller, while still buffering the full stdout/stderr for the
+// completion callback. Mirrors execFile's callback shape.
+type KillReason = 'timeout' | 'maxBuffer' | undefined;
+type SubprocessError = Error & {
+	killed?: boolean;
+	signal?: string;
+	code?: string | number;
+	reason?: KillReason;
+};
+
+function runWithPhases(
+	cmd: string,
+	args: string[],
+	options: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
+	onPhase: OnPhase | undefined,
+	done: (error: SubprocessError | null, stdout: string, stderr: string) => void,
+): void {
+	let stdout = '';
+	let stderr = '';
+	let stderrLine = '';
+	let killReason: KillReason;
+	const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
+
+	let child: ReturnType<typeof spawn>;
+	try {
+		child = spawn(cmd, args, { env: options.env });
+	} catch (err) {
+		done(err as SubprocessError, '', '');
+		return;
+	}
+
+	const timer = options.timeout
+		? setTimeout(() => {
+			killReason = 'timeout';
+			child.kill('SIGTERM');
+		}, options.timeout)
+		: null;
+
+	child.stdout?.on('data', (chunk: Buffer) => {
+		stdout += chunk.toString('utf8');
+		if (stdout.length > maxBuffer) {
+			killReason = killReason ?? 'maxBuffer';
+			child.kill('SIGTERM');
+		}
+	});
+
+	child.stderr?.on('data', (chunk: Buffer) => {
+		const text = chunk.toString('utf8');
+		stderr += text;
+		stderrLine += text;
+		let nl;
+		while ((nl = stderrLine.indexOf('\n')) >= 0) {
+			const line = stderrLine.slice(0, nl).trim();
+			stderrLine = stderrLine.slice(nl + 1);
+			const m = line.match(/^\[filedrop:phase\]\s+(\S+)/);
+			if (m && onPhase) onPhase(m[1] as ConvertPhase);
+		}
+	});
+
+	child.on('error', (err: Error & { code?: string }) => {
+		if (timer) clearTimeout(timer);
+		done(err as SubprocessError, stdout, stderr);
+	});
+
+	child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+		if (timer) clearTimeout(timer);
+		if (code === 0) {
+			done(null, stdout, stderr);
+			return;
+		}
+		const err = new Error(`Command failed: ${cmd}\n${stderr}`) as SubprocessError;
+		err.killed = killReason === 'timeout';
+		err.reason = killReason;
+		err.signal = signal ?? undefined;
+		err.code = code ?? undefined;
+		done(err, stdout, stderr);
+	});
+}
+
 const MARKITDOWN_TIMEOUT_MS = 30_000;
-const LLM_TIMEOUT_MS = 180_000;
+// Per-LLM-request budget enforced inside Python (httpx). Keep this below the
+// Node-side subprocess cap so a stuck request fails with a precise Python
+// error message before Node SIGTERMs the whole subprocess.
+const PYTHON_LLM_TIMEOUT_S = 150;
+// Node-side subprocess caps. Add headroom over PYTHON_LLM_TIMEOUT_S so a
+// single slow-but-eventually-finishing request doesn't get killed mid-flight.
+const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
 // MSG conversion runs body + every attachment through the LLM sequentially,
-// so scanned PDFs with many pages need a much larger budget.
+// so scanned PDFs with many pages need a much larger overall budget — but
+// each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
 const MSG_LLM_TIMEOUT_MS = 720_000;
 
 // The binary/executable family markitdown reports as unsupported.
@@ -45,17 +135,29 @@ function unsupportedFormatDetail(message: string): string | null {
 // the real exception — and fall back to a short reason when there is no stderr
 // (e.g. a timeout or a missing Python interpreter), never the raw command.
 function subprocessErrorDetail(
-	error: Error & { killed?: boolean; signal?: string; code?: string | number },
+	error: SubprocessError,
 	stderr: string
 ): string {
+	// A timeout-killed Python process produces a SIGTERM mid-stream — any
+	// stderr from before the kill is partial and misleading, so report the
+	// timeout directly instead of surfacing it.
+	if (error.reason === 'timeout' || error.killed) {
+		return 'The conversion process timed out before finishing.';
+	}
+	if (error.reason === 'maxBuffer') {
+		return 'The conversion process produced more output than the buffer could hold.';
+	}
+
 	const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
-	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]'));
-	const traceback = lines.filter((l) => !l.startsWith('[filedrop]'));
+	// `[filedrop]` is our diagnostic prefix; `[filedrop:phase]` is the live
+	// progress marker for the status pill — surface the former, drop the latter.
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+	const traceback = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
 	const parts = [...diagnostics];
 	if (traceback.length) parts.push(traceback[traceback.length - 1]);
 	if (parts.length) return parts.join('\n');
 
-	if (error.killed || error.signal === 'SIGTERM') {
+	if (error.signal === 'SIGTERM') {
 		return 'The conversion process timed out before finishing.';
 	}
 	if (error.code === 'ENOENT') {
@@ -80,6 +182,7 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 					FILEDROP_LLM_URL: gateway?.baseUrl,
 					FILEDROP_LLM_KEY: gateway?.apiKey,
 					FILEDROP_LLM_MODEL: gateway?.model,
+					FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 				},
 			},
 			(error: Error | null, stdout: string) => {
@@ -102,13 +205,14 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 export async function runMarkitdown(
 	absolutePath: string,
 	pythonCommand: string,
-	gateway: LlmGateway | null
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
 ): Promise<string> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
 		return new Promise((resolve) => {
-			execFile(
+			runWithPhases(
 				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
@@ -121,9 +225,11 @@ export async function runMarkitdown(
 						FILEDROP_LLM_KEY: gateway.apiKey,
 						FILEDROP_LLM_MODEL: gateway.model,
 						FILEDROP_LLM_PROMPT: gateway.prompt,
+						FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 					},
 				},
-				(error: Error | null, stdout: string, stderr: string) => {
+				onPhase,
+				(error, stdout, stderr) => {
 					if (error) {
 						const unsupported = unsupportedFormatDetail(error.message);
 						if (unsupported) {
@@ -221,7 +327,8 @@ export interface MsgConversionResult {
 export async function runMsgConversion(
 	absolutePath: string,
 	pythonCommand: string,
-	gateway: LlmGateway | null
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
 ): Promise<MsgConversionResult> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
@@ -234,18 +341,40 @@ export async function runMsgConversion(
 		env.FILEDROP_LLM_KEY = gateway.apiKey;
 		env.FILEDROP_LLM_MODEL = gateway.model;
 		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
 	}
 
 	return new Promise((resolve) => {
-		execFile(
+		runWithPhases(
 			pythonCommand,
 			['-c', msgScript, absolutePath],
 			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
-			(error: Error | null, stdout: string, stderr: string) => {
+			onPhase,
+			(error, stdout, stderr) => {
 				if (error) {
+					const unsupported = unsupportedFormatDetail(error.message);
+					if (unsupported) {
+						new Notice('FileDrop: file type not supported by markitdown.');
+						resolve({
+							body: conversionErrorBody('Unsupported file format', unsupported),
+							attachments: [],
+						});
+						return;
+					}
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({
 						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr)),
+						attachments: [],
+					});
+					return;
+				}
+				if (!stdout.trim()) {
+					const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
+					const detail = diagLines
+						? `MSG conversion exited but produced no output.\n\nDiagnostics:\n${diagLines}`
+						: 'MSG conversion exited successfully but produced no output.';
+					resolve({
+						body: conversionErrorBody('MSG conversion produced no output', detail),
 						attachments: [],
 					});
 					return;
@@ -269,7 +398,10 @@ export async function runMsgConversion(
 					});
 				} catch (e) {
 					resolve({
-						body: conversionErrorBody('MSG parse error', String(e)),
+						body: conversionErrorBody(
+							'MSG parse error',
+							`Could not parse MSG conversion output as JSON: ${e instanceof Error ? e.message : String(e)}`,
+						),
 						attachments: [],
 					});
 				}

@@ -359,7 +359,10 @@
   animation: filedrop-pulse 1.4s ease-in-out infinite;
 }
 
-.filedrop-status--converting {
+.filedrop-status--converting,
+.filedrop-status--converting-markitdown,
+.filedrop-status--converting-llm-image,
+.filedrop-status--converting-llm-tags {
   color: var(--text-warning);
   animation: filedrop-pulse 1.4s ease-in-out infinite;
 }

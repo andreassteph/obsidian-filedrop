@@ -128,13 +128,14 @@ def test_convert_file_pptx_keeps_plain_markitdown_when_llm_step_raises():
     assert result == "# Slide text"
 
 
-def test_convert_file_pptx_returns_empty_when_both_steps_fail():
+def test_convert_file_pptx_returns_error_callout_when_both_steps_fail():
     llm_md = MagicMock()
     llm_md.convert.side_effect = Exception("llm boom")
     with patch.object(filedrop_msg, "MarkItDown") as markitdown:
         markitdown.return_value.convert.side_effect = Exception("corrupt deck")
         result = filedrop_msg._convert_file("/tmp/deck.pptx", llm_md, dict(BASE_ENV))
-    assert result == ""
+    assert result.startswith("> [!error] Conversion error: Conversion failed")
+    assert "llm boom" in result
 
 
 def test_build_llm_markitdown_none_without_gateway():

@@ -83,10 +83,32 @@ def _llm_configured(env):
     )
 
 
+_DEFAULT_LLM_TIMEOUT_S = 150.0
+_DEFAULT_CONNECT_TIMEOUT_S = 15.0
+
+
+def _llm_timeout(env):
+    """Bounded per-request timeout; see filedrop_convert._llm_timeout."""
+    raw = env.get("FILEDROP_LLM_TIMEOUT")
+    try:
+        total = float(raw) if raw else _DEFAULT_LLM_TIMEOUT_S
+    except (TypeError, ValueError):
+        total = _DEFAULT_LLM_TIMEOUT_S
+    try:
+        import httpx
+    except ImportError:
+        return total
+    return httpx.Timeout(total, connect=_DEFAULT_CONNECT_TIMEOUT_S)
+
+
 def _make_client(env, **kwargs):
     # x-api-key is sent alongside the SDK's automatic Authorization: Bearer header
     # because the Siemens gateway requires it; other providers ignore it.
+    # max_retries=0: the SDK's default 2 retries silently triple the wait when
+    # a gateway hangs.
     key = env["FILEDROP_LLM_KEY"]
+    kwargs.setdefault("timeout", _llm_timeout(env))
+    kwargs.setdefault("max_retries", 0)
     client = OpenAI(
         api_key=key,
         base_url=env.get("FILEDROP_LLM_URL") or None,
@@ -100,7 +122,7 @@ def _build_llm_markitdown(env):
     """MarkItDown wired to the LLM gateway, or None when no gateway is set."""
     if not _llm_configured(env):
         return None
-    kwargs = {"llm_client": _make_client(env, timeout=720), "llm_model": env["FILEDROP_LLM_MODEL"]}
+    kwargs = {"llm_client": _make_client(env), "llm_model": env["FILEDROP_LLM_MODEL"]}
     prompt = env.get("FILEDROP_LLM_PROMPT")
     if prompt:
         kwargs["llm_prompt"] = prompt
@@ -176,33 +198,83 @@ def _convert_pdf_pages_with_llm(path, env):
     return "\n\n".join(pages)
 
 
+def _emit_phase(phase):
+    print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
+
+
+def _error_callout(title, detail):
+    body = (detail or "").replace("\n", "\n> ")
+    return f"> [!error] Conversion error: {title}\n> {body}"
+
+
+def _warning_callout(detail):
+    body = (detail or "").replace("\n", "\n> ")
+    return f"> [!warning] {body}"
+
+
+def _unsupported_detail(exc):
+    # markitdown raises UnsupportedFormatException for file types it can't read.
+    # Match it by class name so we don't need to import the symbol (it lives in
+    # an internal module that has moved between markitdown versions).
+    if type(exc).__name__ != "UnsupportedFormatException":
+        return None
+    msg = str(exc).strip()
+    return msg or "This file type is not supported by markitdown."
+
+
 def _convert_file(path, llm_md, env):
     """Convert one file (the .msg body or an attachment) to markdown.
 
     Mirrors filedrop_convert.convert(): try markitdown-with-LLM first so
     text-layer PDFs and embedded images are handled cheaply, and only fall back
-    to page-by-page OCR for scanned PDFs that produce nothing. Errors are logged
-    to stderr rather than dumped into the note.
+    to page-by-page OCR for scanned PDFs that produce nothing. On failure
+    returns a `> [!error]` callout instead of an empty string so the user can
+    see what went wrong in the note itself.
     """
+    filename = os.path.basename(path)
+
     if llm_md is None:
-        return _convert_without_llm(path)
+        _emit_phase("markitdown")
+        result = _convert_without_llm(path)
+        if result:
+            return result
+        return _error_callout(
+            "Conversion produced no output",
+            f"markitdown returned empty content for {filename}.",
+        )
 
     is_pdf = path.lower().endswith(".pdf")
+    image_exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif")
+    _emit_phase("llm-image" if path.lower().endswith(image_exts) else "markitdown")
     try:
         result = llm_md.convert(path).text_content
         if result and result.strip():
             return result
     except Exception as exc:
+        unsupported = _unsupported_detail(exc)
+        if unsupported:
+            print(f"[filedrop] unsupported format for {filename}: {unsupported}", file=sys.stderr)
+            return _error_callout("Unsupported file format", unsupported)
         print(f"[filedrop] markitdown LLM step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
-            return _convert_without_llm(path)
+            fallback = _convert_without_llm(path)
+            if fallback:
+                return fallback
+            return _error_callout(
+                "Conversion failed",
+                f"{type(exc).__name__}: {exc}",
+            )
 
     if is_pdf:
+        _emit_phase("llm-image")
         result = _convert_pdf_pages_with_llm(path, env)
         if result:
             return result
 
-    return ""
+    return _error_callout(
+        "Conversion produced no output",
+        f"markitdown returned empty content for {filename}.",
+    )
 
 
 def convert_msg(path, env):
@@ -244,7 +316,12 @@ def convert_msg(path, env):
                     "markdown": att_md,
                 })
     except Exception as exc:
-        warning = f"Attachment extraction failed: {exc}"
+        warning = f"Attachment extraction failed: {type(exc).__name__}: {exc}"
+
+    # Surface the warning inside the note too — a Notice toast disappears,
+    # but the user comes back to the note later to verify it.
+    if warning:
+        body = f"{body}\n\n{_warning_callout(warning)}" if body else _warning_callout(warning)
 
     return {"body": body, "attachments": attachments, "warning": warning}
 
