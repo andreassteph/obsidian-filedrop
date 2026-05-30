@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.1.21 — Split conversion status and fix LLM timeout issues
+
+### Changes
+
+- Split converting status into separate markitdown and LLM phases for better feedback
+- Fix spurious LLM timeouts on trivial inputs
+- Improve MSG conversion error messaging consistency
+
 ## 0.1.20 — Improve error handling and messages
 
 ### Changes
