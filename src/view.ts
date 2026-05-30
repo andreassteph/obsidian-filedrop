@@ -2,6 +2,8 @@ import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obs
 
 import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import { replaceTagsBlock } from './utils';
+import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
+import { ReferenceModal } from './reference-modal';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -254,6 +256,22 @@ export class FileDropView extends ItemView {
 			}
 		});
 
+		if (this.plugin.settings.referenceGroups.length > 0) {
+			const refsBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-add-refs', text: 'Add references' });
+			refsBtn.title = 'Find and add references to matching notes';
+			refsBtn.disabled = inProgress;
+			refsBtn.addEventListener('click', async () => {
+				refsBtn.disabled = true;
+				refsBtn.setText('Finding references…');
+				try {
+					await this.addReferencesForEntry(entry);
+				} finally {
+					refsBtn.disabled = false;
+					refsBtn.setText('Add references');
+				}
+			});
+		}
+
 		const tagInput = summaryRow.createEl('input', { cls: 'filedrop-tag-input' });
 		tagInput.type = 'text';
 		tagInput.placeholder = 'add tag…';
@@ -265,6 +283,80 @@ export class FileDropView extends ItemView {
 				}
 			}
 		});
+	}
+
+	private async addReferencesForEntry(entry: DroppedFile): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+
+		const noteFile = this.app.vault.getAbstractFileByPath(entry.notePath);
+		if (!(noteFile instanceof TFile)) {
+			new Notice('FileDrop: could not find the note.');
+			return;
+		}
+
+		const content = await this.app.vault.read(noteFile);
+		const fmEnd = content.indexOf('\n---\n');
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+
+		let metadata = extractActivityMetadata(body, entry.filePath, noteFile.stat);
+
+		if (gateway && isGatewayEnabled(gateway)) {
+			const hasNull = metadata.date === null || metadata.type === null || metadata.people === null;
+			if (hasNull) {
+				const result = await fillMetadataWithLLM(metadata, body, gateway);
+				if (result.ok) metadata = result.value;
+			}
+		}
+
+		// Get or generate summary
+		let summary = this.app.metadataCache.getFileCache(noteFile)?.frontmatter?.summary ?? '';
+		if (!summary && gateway && isGatewayEnabled(gateway)) {
+			const result = await summarizeContent(body, gateway);
+			if (result.ok) {
+				await this.writeNoteSummary(entry.notePath, result.value);
+				summary = result.value;
+			}
+		}
+
+		const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
+		let matchedNotes: MatchedNote[] = [];
+
+		if (gateway && isGatewayEnabled(gateway)) {
+			const result = await matchCandidatesWithLLM(
+				body,
+				groupCandidates,
+				gateway,
+				this.plugin.settings.referenceMaxMatches,
+			);
+			if (result.ok) {
+				matchedNotes = result.value;
+			} else {
+				new Notice(`FileDrop: matching failed — ${this.llmErrorMessage(result.reason, result.detail)}. Showing all candidates.`);
+				// Fall back to all candidates unranked
+				const seen = new Set<string>();
+				for (const { group, candidates } of groupCandidates) {
+					for (const candidate of candidates) {
+						if (!seen.has(candidate.file.path)) {
+							seen.add(candidate.file.path);
+							matchedNotes.push({ candidate, group });
+						}
+					}
+				}
+			}
+		} else {
+			// No LLM — show all candidates unranked
+			const seen = new Set<string>();
+			for (const { group, candidates } of groupCandidates) {
+				for (const candidate of candidates) {
+					if (!seen.has(candidate.file.path)) {
+						seen.add(candidate.file.path);
+						matchedNotes.push({ candidate, group });
+					}
+				}
+			}
+		}
+
+		new ReferenceModal(this.app, this.plugin, entry, noteFile, metadata, summary, matchedNotes).open();
 	}
 
 	private hideEntry(entry: DroppedFile): void {

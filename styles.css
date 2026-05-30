@@ -327,7 +327,8 @@
 
 .filedrop-update-btn,
 .filedrop-entry-summary,
-.filedrop-entry-suggest-tags {
+.filedrop-entry-suggest-tags,
+.filedrop-entry-add-refs {
   font-size: var(--font-ui-smaller);
   background: none;
   border: 1px solid var(--background-modifier-border);
@@ -341,16 +342,115 @@
 
 .filedrop-update-btn:hover,
 .filedrop-entry-summary:hover,
-.filedrop-entry-suggest-tags:hover {
+.filedrop-entry-suggest-tags:hover,
+.filedrop-entry-add-refs:hover {
   color: var(--interactive-accent);
   border-color: var(--interactive-accent);
 }
 
 .filedrop-update-btn:disabled,
 .filedrop-entry-summary:disabled,
-.filedrop-entry-suggest-tags:disabled {
+.filedrop-entry-suggest-tags:disabled,
+.filedrop-entry-add-refs:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* Reference modal */
+
+.filedrop-ref-modal-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.filedrop-ref-modal-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.filedrop-ref-modal-label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.filedrop-ref-modal-group {
+  color: var(--text-muted);
+  font-weight: normal;
+}
+
+.filedrop-ref-modal-desc {
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.filedrop-ref-modal-hint {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.filedrop-ref-modal-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+/* Reference condition group settings */
+
+.filedrop-ref-cond-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 16px;
+}
+
+.filedrop-ref-cond-input {
+  width: 120px;
+  font-size: var(--font-ui-small);
+}
+
+.filedrop-ref-cond-eq {
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.filedrop-ref-cond-remove {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: var(--font-ui-small);
+  padding: 0 4px;
+}
+
+.filedrop-ref-cond-remove:hover {
+  color: var(--text-error);
+}
+
+.filedrop-ref-add-cond {
+  margin: 4px 16px 8px;
+  font-size: var(--font-ui-smaller);
+  background: none;
+  border: 1px dashed var(--background-modifier-border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 8px;
+}
+
+.filedrop-ref-add-cond:hover {
+  color: var(--interactive-accent);
+  border-color: var(--interactive-accent);
 }
 
 /* Tags */

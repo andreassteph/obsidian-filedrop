@@ -13,6 +13,20 @@ export interface LlmGateway {
 	prompt: string;
 }
 
+export interface ReferenceCondition {
+	field: string;
+	value: string;
+}
+
+export interface ReferenceConditionGroup {
+	id: string;
+	name: string;
+	conditions: ReferenceCondition[];
+	matchFields: string[];      // frontmatter fields used as LLM matching context
+	targetSection: string;      // e.g. "# Activities"
+	template: string;           // empty = use global referenceTemplate
+}
+
 export interface FileDropSettings {
 	incomingDir: string;
 	categories: string[];
@@ -20,6 +34,9 @@ export interface FileDropSettings {
 	preferredTags: string;
 	llmGateways: LlmGateway[];
 	pythonCommand: string;
+	referenceGroups: ReferenceConditionGroup[];
+	referenceTemplate: string;
+	referenceMaxMatches: number;
 	// Legacy fields — read on first load for migration only
 	llmProvider?: string;
 	llmGatewayUrl?: string;
@@ -96,6 +113,9 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	preferredTags: '',
 	llmGateways: [],
 	pythonCommand: 'python3',
+	referenceGroups: [],
+	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
+	referenceMaxMatches: 5,
 };
 
 export interface PreferredTag {
@@ -263,7 +283,7 @@ export function isErrorBody(content: string): boolean {
 
 // Reasoning models emit chain-of-thought inline; strip it so it never pollutes
 // the tag parse. Mirrors strip_thinking in python/filedrop_convert.py.
-function stripThinking(text: string): string {
+export function stripThinking(text: string): string {
 	let cleaned = text.replace(/<(think|thinking|reasoning)>[\s\S]*?<\/\1>/gi, '');
 	const closers = /<\/(think|thinking|reasoning)>/gi;
 	let lastEnd = -1;

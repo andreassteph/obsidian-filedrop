@@ -4,6 +4,7 @@ import {
 	DEFAULT_SETTINGS,
 	LlmGateway,
 	LLM_PROVIDERS,
+	ReferenceConditionGroup,
 	fetchModelsForGateway,
 	gatewayUrlIssue,
 	isGatewayEnabled,
@@ -198,6 +199,61 @@ export class FileDropSettingTab extends PluginSettingTab {
 				});
 			});
 
+		// References
+		new Setting(containerEl).setName('References').setHeading();
+
+		new Setting(containerEl)
+			.setName('Default reference template')
+			.setDesc('Template for reference paragraphs inserted into matching notes. Variables: {{date}}, {{type}}, {{summary}}, {{title}}, {{people}}, {{note_link}}')
+			.addTextArea((text) => {
+				text
+					.setValue(this.plugin.settings.referenceTemplate)
+					.onChange(async (value) => {
+						this.plugin.settings.referenceTemplate = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 6;
+				text.inputEl.style.width = '100%';
+				text.inputEl.style.fontFamily = 'monospace';
+			});
+
+		new Setting(containerEl)
+			.setName('Max matches')
+			.setDesc('Maximum number of matching notes the LLM returns per run.')
+			.addText((text) =>
+				text
+					.setValue(String(this.plugin.settings.referenceMaxMatches))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!isNaN(n) && n > 0) {
+							this.plugin.settings.referenceMaxMatches = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		this.plugin.settings.referenceGroups.forEach((group, idx) => {
+			this.renderReferenceGroup(containerEl, group, idx);
+		});
+
+		new Setting(containerEl)
+			.setName('Add condition group')
+			.setDesc('Define a set of frontmatter conditions identifying notes that should receive references.')
+			.addButton((btn) =>
+				btn.setButtonText('+ Add group').onClick(async () => {
+					this.plugin.settings.referenceGroups.push({
+						id: crypto.randomUUID(),
+						name: 'New group',
+						conditions: [],
+						matchFields: ['name', 'title', 'description'],
+						targetSection: '# Activities',
+						template: '',
+					});
+					await this.plugin.saveSettings();
+					this.display();
+				})
+			);
+
 		// Auto-populate models for gateways with credentials but no cached models yet
 		this.plugin.settings.llmGateways.forEach((gw) => {
 			if (!this.gatewayModels.has(gw.id) && gw.baseUrl && gw.apiKey) {
@@ -353,5 +409,123 @@ export class FileDropSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+	}
+
+	private renderReferenceGroup(containerEl: HTMLElement, group: ReferenceConditionGroup, idx: number): void {
+		const wrapperEl = containerEl.createDiv({ cls: 'filedrop-gateway-entry' });
+
+		new Setting(wrapperEl)
+			.setName(`Group ${idx + 1}`)
+			.addText((text) =>
+				text
+					.setPlaceholder('Group name, e.g. Customers')
+					.setValue(group.name)
+					.onChange(async (value) => {
+						this.plugin.settings.referenceGroups[idx].name = value.trim();
+						await this.plugin.saveSettings();
+					})
+			)
+			.addButton((btn) =>
+				btn
+					.setIcon('trash')
+					.setTooltip('Remove group')
+					.onClick(async () => {
+						this.plugin.settings.referenceGroups.splice(idx, 1);
+						await this.plugin.saveSettings();
+						this.display();
+					})
+			);
+
+		// Conditions
+		const condLabel = wrapperEl.createEl('div', { cls: 'setting-item-name', text: 'Conditions (AND)' });
+		condLabel.style.paddingLeft = '16px';
+		condLabel.style.paddingTop = '8px';
+		condLabel.style.fontSize = 'var(--font-ui-smaller)';
+		condLabel.style.color = 'var(--text-muted)';
+
+		group.conditions.forEach((cond, ci) => {
+			const condRow = wrapperEl.createDiv({ cls: 'filedrop-ref-cond-row' });
+			const fieldInput = condRow.createEl('input');
+			fieldInput.type = 'text';
+			fieldInput.placeholder = 'field';
+			fieldInput.value = cond.field;
+			fieldInput.className = 'filedrop-ref-cond-input';
+			fieldInput.addEventListener('change', async () => {
+				this.plugin.settings.referenceGroups[idx].conditions[ci].field = fieldInput.value.trim();
+				await this.plugin.saveSettings();
+			});
+
+			condRow.createSpan({ text: '=', cls: 'filedrop-ref-cond-eq' });
+
+			const valueInput = condRow.createEl('input');
+			valueInput.type = 'text';
+			valueInput.placeholder = 'value';
+			valueInput.value = cond.value;
+			valueInput.className = 'filedrop-ref-cond-input';
+			valueInput.addEventListener('change', async () => {
+				this.plugin.settings.referenceGroups[idx].conditions[ci].value = valueInput.value.trim();
+				await this.plugin.saveSettings();
+			});
+
+			const removeBtn = condRow.createEl('button', { text: '×' });
+			removeBtn.className = 'filedrop-ref-cond-remove';
+			removeBtn.addEventListener('click', async () => {
+				this.plugin.settings.referenceGroups[idx].conditions.splice(ci, 1);
+				await this.plugin.saveSettings();
+				this.display();
+			});
+		});
+
+		const addCondBtn = wrapperEl.createEl('button', { text: '+ Add condition', cls: 'filedrop-ref-add-cond' });
+		addCondBtn.addEventListener('click', async () => {
+			this.plugin.settings.referenceGroups[idx].conditions.push({ field: '', value: '' });
+			await this.plugin.saveSettings();
+			this.display();
+		});
+
+		new Setting(wrapperEl)
+			.setName('Match fields')
+			.setDesc('Comma-separated frontmatter fields sent to the LLM as context for matching.')
+			.addText((text) =>
+				text
+					.setPlaceholder('name, title, description')
+					.setValue(group.matchFields.join(', '))
+					.onChange(async (value) => {
+						this.plugin.settings.referenceGroups[idx].matchFields = value
+							.split(',')
+							.map((f) => f.trim())
+							.filter((f) => f.length > 0);
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(wrapperEl)
+			.setName('Target section')
+			.setDesc('Heading in the target note where references are inserted, e.g. "# Activities".')
+			.addText((text) =>
+				text
+					.setPlaceholder('# Activities')
+					.setValue(group.targetSection)
+					.onChange(async (value) => {
+						this.plugin.settings.referenceGroups[idx].targetSection = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(wrapperEl)
+			.setName('Template override')
+			.setDesc('Leave blank to use the global template. Variables: {{date}}, {{type}}, {{summary}}, {{title}}, {{people}}, {{note_link}}')
+			.addTextArea((text) => {
+				text
+					.setPlaceholder('Leave blank to use global template')
+					.setValue(group.template)
+					.onChange(async (value) => {
+						this.plugin.settings.referenceGroups[idx].template = value;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 4;
+				text.inputEl.style.width = '100%';
+				text.inputEl.style.fontFamily = 'monospace';
+			});
 	}
 }
