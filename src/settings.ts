@@ -42,7 +42,7 @@ export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
 	custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', keyPlaceholder: 'sk-…' },
 };
 
-export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified';
+export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified' | 'error';
 
 export interface DroppedFile {
 	filename: string;
@@ -227,7 +227,7 @@ export type LlmResult<T> = { ok: true; value: T } | { ok: false; reason: LlmOpEr
 
 // Conversion failures are written into the note body as callouts; we must not
 // ask the LLM to tag an error message. Matches conversionErrorBody() in convert.ts.
-function isErrorBody(content: string): boolean {
+export function isErrorBody(content: string): boolean {
 	const head = content.trimStart();
 	return head.startsWith('> [!error]') || head.startsWith('> [!warning]');
 }

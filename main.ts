@@ -7,6 +7,7 @@ import {
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
+	isErrorBody,
 	migrateLegacyLlmFields,
 	parsePreferredTags,
 	suggestTags,
@@ -181,12 +182,12 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = 'converted';
+			entry.status = isErrorBody(markdownBody) ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
-			const idx = this.recentFiles.indexOf(entry);
-			if (idx >= 0) this.recentFiles.splice(idx, 1);
+			entry.status = 'error';
+			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: conversion failed — ${e instanceof Error ? e.message : String(e)}`);
 		}
@@ -234,11 +235,12 @@ export default class FileDropPlugin extends Plugin {
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
 			entry.tags = [...mergedTags];
-			entry.status = 'converted';
+			entry.status = isErrorBody(newBody) ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
-			entry.status = 'converted';
+			entry.status = 'error';
+			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
 		}
