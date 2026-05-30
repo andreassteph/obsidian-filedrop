@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.2.1 — Sidebar layout optimizations and smarter filelist refresh
+
+### Changes
+
+- Move category dropdown inline in drop area header (saves vertical space)
+- Expand file list to full height when drop area is collapsed
+- Refresh verified and processed flags from frontmatter on filelist update
+- Auto-hide files marked as `processed: true`
+- Auto-surface files that lost their verified flag
+
 ## 0.2.0 — Sidebar redesign and improved file actions
 
 ### Changes
