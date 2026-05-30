@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.19 — Show file status during conversion
+
+### Changes
+
+- Show files immediately on drop with moving/converting/converted status indicators
+- Improve UI feedback during file processing
+
 ## 0.1.18 — Add sidebar refresh button and improve .msg conversion
 
 ### Changes
