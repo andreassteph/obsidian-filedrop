@@ -491,6 +491,56 @@
   word-break: break-all;
 }
 
+/* Group mode toggle button */
+
+.filedrop-group-btn {
+  font-size: var(--font-ui-small);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: none;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+
+.filedrop-group-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.filedrop-group-btn--active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+
+.filedrop-group-btn--active:hover {
+  background: var(--interactive-accent-hover);
+  border-color: var(--interactive-accent-hover);
+}
+
+/* Group status bar (shown inside drop area when group mode is on) */
+
+.filedrop-group-status {
+  font-size: var(--font-ui-small);
+  padding: 4px 10px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+  border: 1px solid color-mix(in srgb, var(--interactive-accent) 40%, transparent);
+  color: var(--text-normal);
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.filedrop-group-status-badge {
+  flex: 1;
+}
+
 /* Confirm modal */
 
 .filedrop-confirm-buttons {

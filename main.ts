@@ -29,6 +29,18 @@ export default class FileDropPlugin extends Plugin {
 	settings: FileDropSettings;
 	recentFiles: DroppedFile[];
 
+	// Group mode state
+	groupModeActive = false;
+	private readonly GROUP_IDLE_MS = 20_000;
+	private groupQueue: File[] = [];
+	private _groupName: string | null = null;
+	private groupCategory = '';
+	private groupGatewayId: string | null = null;
+	private groupTimeoutId: number | null = null;
+
+	get groupQueueCount(): number { return this.groupQueue.length; }
+	get groupCurrentName(): string { return this._groupName ?? ''; }
+
 	async onload(): Promise<void> {
 		await this.loadSettings();
 		this.registerView(VIEW_TYPE, (leaf) => new FileDropView(leaf, this));
@@ -43,7 +55,186 @@ export default class FileDropPlugin extends Plugin {
 	}
 
 	async onunload(): Promise<void> {
+		this.clearGroupTimer();
 		this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+	}
+
+	startGroupMode(category: string, gatewayId: string | null): void {
+		this.groupModeActive = true;
+		this.groupQueue = [];
+		this._groupName = null;
+		this.groupCategory = category;
+		this.groupGatewayId = gatewayId;
+		this.getActiveView()?.onGroupModeChanged();
+	}
+
+	stopGroupMode(): void {
+		this.clearGroupTimer();
+		this.groupModeActive = false;
+		this.groupQueue = [];
+		this._groupName = null;
+		this.getActiveView()?.onGroupModeChanged();
+	}
+
+	async finalizeAndStopGroupMode(): Promise<void> {
+		this.clearGroupTimer();
+		const queue = [...this.groupQueue];
+		const name = this._groupName ?? 'group';
+		const category = this.groupCategory;
+		const gatewayId = this.groupGatewayId;
+		this.groupModeActive = false;
+		this.groupQueue = [];
+		this._groupName = null;
+		this.getActiveView()?.onGroupModeChanged();
+		if (queue.length > 0) {
+			await this.processFileGroup(queue, name, category, gatewayId);
+		}
+	}
+
+	resetGroupIdleTimer(): void {
+		this.clearGroupTimer();
+		this.groupTimeoutId = window.setTimeout(() => {
+			this.getActiveView()?.promptGroupFinish();
+		}, this.GROUP_IDLE_MS);
+	}
+
+	private clearGroupTimer(): void {
+		if (this.groupTimeoutId !== null) {
+			clearTimeout(this.groupTimeoutId);
+			this.groupTimeoutId = null;
+		}
+	}
+
+	private queueFileForGroup(file: File): void {
+		if (this._groupName === null) {
+			const dot = file.name.lastIndexOf('.');
+			this._groupName = dot > 0 ? file.name.slice(0, dot) : file.name;
+		}
+		this.groupQueue.push(file);
+		this.resetGroupIdleTimer();
+		this.getActiveView()?.onGroupModeChanged();
+	}
+
+	private async processFileGroup(
+		files: File[],
+		groupBaseName: string,
+		category: string,
+		gatewayId: string | null,
+	): Promise<void> {
+		const { vault } = this.app;
+		const monthSlug = getMonthSlug();
+		const subfolderPath = normalizePath(`${this.settings.incomingDir}/${monthSlug}/${category}`);
+
+		await this.ensureDir(normalizePath(this.settings.incomingDir));
+		await this.ensureDir(normalizePath(`${this.settings.incomingDir}/${monthSlug}`));
+		await this.ensureDir(subfolderPath);
+
+		const groupDirName = `${groupBaseName}.group`;
+		const groupDirPath = normalizePath(`${subfolderPath}/${groupDirName}`);
+		await this.ensureDir(groupDirPath);
+
+		let noteName = noteNameFromFile(groupDirName);
+		let notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
+		let dupIdx = 1;
+		while (await vault.adapter.exists(notePath)) {
+			dupIdx++;
+			noteName = noteNameFromFile(dedupeName(groupDirName, dupIdx));
+			notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
+		}
+
+		const gateway = gatewayId
+			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+			: null;
+
+		const entry: DroppedFile = {
+			filename: `${groupBaseName} (group, ${files.length} file${files.length !== 1 ? 's' : ''})`,
+			filePath: groupDirPath,
+			notePath,
+			tags: [],
+			category,
+			droppedAt: Date.now(),
+			verified: false,
+			status: 'moving',
+		};
+		this.recentFiles.unshift(entry);
+		if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
+		this.getActiveView()?.renderFileList();
+
+		try {
+			const basePath: string | undefined = (vault.adapter as any).basePath;
+			const attachmentFrontmatterLines: string[] = [];
+			const bodyParts: string[] = [];
+			let anyError = false;
+
+			entry.status = 'converting-markitdown';
+			this.getActiveView()?.renderFileList();
+
+			for (const file of files) {
+				const buffer = await file.arrayBuffer();
+				let rawName = file.name;
+				let rawFilePath = normalizePath(`${groupDirPath}/${rawName}`);
+				let fDupIdx = 1;
+				while (await vault.adapter.exists(rawFilePath)) {
+					fDupIdx++;
+					rawName = dedupeName(file.name, fDupIdx);
+					rawFilePath = normalizePath(`${groupDirPath}/${rawName}`);
+				}
+				await vault.adapter.writeBinary(rawFilePath, buffer);
+				attachmentFrontmatterLines.push(
+					`  - "[[${monthSlug}/${category}/${groupDirName}/${rawName}]]"`
+				);
+
+				const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
+				const onPhase = (phase: 'markitdown' | 'llm-image') => {
+					entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+					this.getActiveView()?.renderFileList();
+				};
+
+				let markdown: string;
+				try {
+					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+					if (isErrorBody(markdown)) anyError = true;
+				} catch (e) {
+					markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
+					anyError = true;
+				}
+
+				bodyParts.push(`## ${rawName}\n\n${markdown}`);
+			}
+
+			entry.status = 'converting-llm-tags';
+			this.getActiveView()?.renderFileList();
+
+			const combinedBody = bodyParts.join('\n\n---\n\n');
+			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
+
+			const frontmatterLines = [
+				'---',
+				`original-file: "[[${monthSlug}/${category}/${groupDirName}]]"`,
+				`group-name: ${JSON.stringify(groupBaseName)}`,
+				'processed: false',
+				'verified: false',
+				`tags: ${JSON.stringify(mergedTags)}`,
+				'attachments:',
+				...attachmentFrontmatterLines,
+				'---',
+				'',
+				combinedBody,
+			];
+
+			await vault.create(notePath, frontmatterLines.join('\n'));
+
+			entry.tags = [...mergedTags];
+			entry.status = anyError ? 'error' : 'converted';
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+		} catch (e) {
+			entry.status = 'error';
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+			new Notice(`FileDrop: group conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+		}
 	}
 
 	async loadSettings(): Promise<void> {
@@ -70,6 +261,11 @@ export default class FileDropPlugin extends Plugin {
 	}
 
 	async processDroppedFile(file: File, category: string, gatewayId: string | null): Promise<void> {
+		if (this.groupModeActive) {
+			this.queueFileForGroup(file);
+			return;
+		}
+
 		const { vault } = this.app;
 		const monthSlug = getMonthSlug();
 		const subfolderPath = normalizePath(`${this.settings.incomingDir}/${monthSlug}/${category}`);

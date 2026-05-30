@@ -12,6 +12,8 @@ export class FileDropView extends ItemView {
 	private modelSelectEl: HTMLSelectElement | null = null;
 	private hiddenNotePaths = new Set<string>();
 	private showVerified = false;
+	private groupBtnEl: HTMLButtonElement | null = null;
+	private groupStatusEl: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
 		super(leaf);
@@ -42,6 +44,20 @@ export class FileDropView extends ItemView {
 		const dropHeader = dropSection.createDiv({ cls: 'filedrop-droparea-header' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Drop files' });
+		this.groupBtnEl = dropHeader.createEl('button', { cls: 'filedrop-group-btn', text: 'Group' });
+		this.groupBtnEl.title = 'Toggle group mode — batch multiple files into one note';
+		this.groupBtnEl.addEventListener('click', (e) => {
+			e.stopPropagation();
+			if (this.plugin.groupModeActive) {
+				if (this.plugin.groupQueueCount > 0) {
+					this.plugin.finalizeAndStopGroupMode();
+				} else {
+					this.plugin.stopGroupMode();
+				}
+			} else {
+				this.plugin.startGroupMode(this.selectedCategory, this.selectedGatewayId);
+			}
+		});
 		const categorySelect = dropHeader.createEl('select', { cls: 'filedrop-category-select' });
 		this.plugin.settings.categories.forEach((cat) => {
 			const opt = categorySelect.createEl('option', { value: cat, text: cat });
@@ -54,6 +70,10 @@ export class FileDropView extends ItemView {
 		dropHeader.addEventListener('click', () => {
 			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
 		});
+
+		// Group status bar (hidden when group mode is off)
+		this.groupStatusEl = dropBody.createDiv({ cls: 'filedrop-group-status' });
+		this.groupStatusEl.style.display = 'none';
 
 		// Drop zone
 		const dropZone = dropBody.createDiv({ cls: 'filedrop-zone' });
@@ -140,6 +160,44 @@ export class FileDropView extends ItemView {
 			this.selectedGatewayId = null;
 		}
 		this.populateModelSelect(this.modelSelectEl);
+	}
+
+	onGroupModeChanged(): void {
+		const active = this.plugin.groupModeActive;
+		if (this.groupBtnEl) {
+			this.groupBtnEl.toggleClass('filedrop-group-btn--active', active);
+			this.groupBtnEl.setText(active ? 'Finalize Group' : 'Group');
+			this.groupBtnEl.title = active
+				? `Finalize group "${this.plugin.groupCurrentName}" (${this.plugin.groupQueueCount} file(s) queued)`
+				: 'Toggle group mode — batch multiple files into one note';
+		}
+		if (this.groupStatusEl) {
+			if (active) {
+				this.groupStatusEl.style.display = '';
+				this.groupStatusEl.empty();
+				const count = this.plugin.groupQueueCount;
+				const name = this.plugin.groupCurrentName;
+				this.groupStatusEl.createEl('span', {
+					cls: 'filedrop-group-status-badge',
+					text: count > 0
+						? `"${name}" — ${count} file${count !== 1 ? 's' : ''} queued`
+						: 'Drop files to add to group',
+				});
+			} else {
+				this.groupStatusEl.style.display = 'none';
+				this.groupStatusEl.empty();
+			}
+		}
+	}
+
+	promptGroupFinish(): void {
+		new GroupFinishModal(
+			this.app,
+			this.plugin.groupCurrentName,
+			this.plugin.groupQueueCount,
+			async () => { await this.plugin.finalizeAndStopGroupMode(); },
+			() => { this.plugin.resetGroupIdleTimer(); },
+		).open();
 	}
 
 	renderFileList(): void {
@@ -425,6 +483,45 @@ class ConfirmModal extends Modal {
 	}
 
 	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+class GroupFinishModal extends Modal {
+	private resolved = false;
+
+	constructor(
+		app: App,
+		private readonly groupName: string,
+		private readonly fileCount: number,
+		private readonly onFinalize: () => Promise<void>,
+		private readonly onKeepAdding: () => void,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		const count = this.fileCount;
+		this.contentEl.createEl('p', {
+			text: `No files dropped for 20 seconds. Group "${this.groupName}" has ${count} file${count !== 1 ? 's' : ''} queued. Is the group finished?`,
+		});
+		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
+		const keepBtn = buttons.createEl('button', { text: 'Keep adding' });
+		keepBtn.addEventListener('click', () => {
+			this.resolved = true;
+			this.onKeepAdding();
+			this.close();
+		});
+		const finalizeBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Finalize group' });
+		finalizeBtn.addEventListener('click', async () => {
+			this.resolved = true;
+			this.close();
+			await this.onFinalize();
+		});
+	}
+
+	onClose(): void {
+		if (!this.resolved) this.onKeepAdding();
 		this.contentEl.empty();
 	}
 }
