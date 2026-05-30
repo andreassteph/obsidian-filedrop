@@ -1,6 +1,6 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, LlmOpError, VIEW_TYPE, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
+import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import { replaceTagsBlock } from './utils';
 import type FileDropPlugin from '../main';
 
@@ -164,9 +164,12 @@ export class FileDropView extends ItemView {
 		});
 
 		const status = entry.status ?? 'converted';
-		headerRow.createEl('span', { cls: `filedrop-status filedrop-status--${status}`, text: status });
+		headerRow.createEl('span', {
+			cls: `filedrop-status filedrop-status--${status}`,
+			text: STATUS_LABELS[status] ?? status,
+		});
 
-		const inProgress = status === 'moving' || status === 'converting';
+		const inProgress = status === 'moving' || isConvertingStatus(status);
 
 		const verifiedLabel = headerRow.createEl('label', { cls: 'filedrop-verified-label' });
 		const verifiedCheckbox = verifiedLabel.createEl('input', { cls: 'filedrop-verified-checkbox' });

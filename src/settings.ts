@@ -42,7 +42,35 @@ export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
 	custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', keyPlaceholder: 'sk-…' },
 };
 
-export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified' | 'error';
+export type FileDropStatus =
+	| 'moving'
+	| 'converting'
+	| 'converting-markitdown'
+	| 'converting-llm-image'
+	| 'converting-llm-tags'
+	| 'converted'
+	| 'verified'
+	| 'error';
+
+export const STATUS_LABELS: Record<FileDropStatus, string> = {
+	moving: 'moving',
+	converting: 'converting',
+	'converting-markitdown': 'converting (markitdown)',
+	'converting-llm-image': 'converting (llm picture description)',
+	'converting-llm-tags': 'converting (llm description)',
+	converted: 'converted',
+	verified: 'verified',
+	error: 'error',
+};
+
+export function isConvertingStatus(status: FileDropStatus): boolean {
+	return (
+		status === 'converting' ||
+		status === 'converting-markitdown' ||
+		status === 'converting-llm-image' ||
+		status === 'converting-llm-tags'
+	);
+}
 
 export interface DroppedFile {
 	filename: string;

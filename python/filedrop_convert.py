@@ -81,6 +81,10 @@ def build_converter(env):
     return MarkItDown(**kwargs)
 
 
+def _emit_phase(phase):
+    print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
+
+
 def convert(path, env):
     is_pdf = path.lower().endswith(".pdf")
 
@@ -89,6 +93,10 @@ def convert(path, env):
     # described by the LLM. Works well for text-layer PDFs. Scanned PDFs often
     # return empty here because pdfminer finds no text layer and there are no
     # discrete embedded images — we catch that and fall through.
+    # Pure-image files go straight into the LLM via markitdown's image path,
+    # so signal that phase up front instead of "markitdown".
+    image_exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif")
+    _emit_phase("llm-image" if path.lower().endswith(image_exts) else "markitdown")
     try:
         result = build_converter(env).convert(path).text_content
         if result and result.strip():
@@ -104,6 +112,7 @@ def convert(path, env):
     # For PDFs that produced nothing (scanned / image-only), render each page
     # via PyMuPDF and OCR with the LLM.
     if is_pdf:
+        _emit_phase("llm-image")
         result = _convert_pdf_pages_with_llm(path, env)
         if result:
             return result

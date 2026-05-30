@@ -7,6 +7,77 @@ import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
 
+export type ConvertPhase = 'markitdown' | 'llm-image';
+export type OnPhase = (phase: ConvertPhase) => void;
+
+// Run a subprocess, streaming stderr live so we can forward `[filedrop:phase]`
+// markers to the caller, while still buffering the full stdout/stderr for the
+// completion callback. Mirrors execFile's callback shape.
+function runWithPhases(
+	cmd: string,
+	args: string[],
+	options: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
+	onPhase: OnPhase | undefined,
+	done: (error: (Error & { killed?: boolean; signal?: string; code?: string | number }) | null, stdout: string, stderr: string) => void,
+): void {
+	let stdout = '';
+	let stderr = '';
+	let stderrLine = '';
+	let killedByTimeout = false;
+	const maxBuffer = options.maxBuffer ?? 10 * 1024 * 1024;
+
+	let child: ReturnType<typeof spawn>;
+	try {
+		child = spawn(cmd, args, { env: options.env });
+	} catch (err) {
+		done(err as Error & { code?: string | number }, '', '');
+		return;
+	}
+
+	const timer = options.timeout
+		? setTimeout(() => {
+			killedByTimeout = true;
+			child.kill('SIGTERM');
+		}, options.timeout)
+		: null;
+
+	child.stdout?.on('data', (chunk: Buffer) => {
+		stdout += chunk.toString('utf8');
+		if (stdout.length > maxBuffer) child.kill('SIGTERM');
+	});
+
+	child.stderr?.on('data', (chunk: Buffer) => {
+		const text = chunk.toString('utf8');
+		stderr += text;
+		stderrLine += text;
+		let nl;
+		while ((nl = stderrLine.indexOf('\n')) >= 0) {
+			const line = stderrLine.slice(0, nl).trim();
+			stderrLine = stderrLine.slice(nl + 1);
+			const m = line.match(/^\[filedrop:phase\]\s+(\S+)/);
+			if (m && onPhase) onPhase(m[1] as ConvertPhase);
+		}
+	});
+
+	child.on('error', (err: Error & { code?: string }) => {
+		if (timer) clearTimeout(timer);
+		done(err, stdout, stderr);
+	});
+
+	child.on('close', (code: number | null, signal: NodeJS.Signals | null) => {
+		if (timer) clearTimeout(timer);
+		if (code === 0) {
+			done(null, stdout, stderr);
+			return;
+		}
+		const err = new Error(`Command failed: ${cmd}\n${stderr}`) as Error & { killed?: boolean; signal?: string; code?: string | number };
+		err.killed = killedByTimeout;
+		err.signal = signal ?? undefined;
+		err.code = code ?? undefined;
+		done(err, stdout, stderr);
+	});
+}
+
 const MARKITDOWN_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 180_000;
 // MSG conversion runs body + every attachment through the LLM sequentially,
@@ -102,13 +173,14 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 export async function runMarkitdown(
 	absolutePath: string,
 	pythonCommand: string,
-	gateway: LlmGateway | null
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
 ): Promise<string> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
 		return new Promise((resolve) => {
-			execFile(
+			runWithPhases(
 				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
@@ -123,7 +195,8 @@ export async function runMarkitdown(
 						FILEDROP_LLM_PROMPT: gateway.prompt,
 					},
 				},
-				(error: Error | null, stdout: string, stderr: string) => {
+				onPhase,
+				(error, stdout, stderr) => {
 					if (error) {
 						const unsupported = unsupportedFormatDetail(error.message);
 						if (unsupported) {
@@ -221,7 +294,8 @@ export interface MsgConversionResult {
 export async function runMsgConversion(
 	absolutePath: string,
 	pythonCommand: string,
-	gateway: LlmGateway | null
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
 ): Promise<MsgConversionResult> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
@@ -237,11 +311,12 @@ export async function runMsgConversion(
 	}
 
 	return new Promise((resolve) => {
-		execFile(
+		runWithPhases(
 			pythonCommand,
 			['-c', msgScript, absolutePath],
 			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
-			(error: Error | null, stdout: string, stderr: string) => {
+			onPhase,
+			(error, stdout, stderr) => {
 				if (error) {
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({

@@ -176,6 +176,10 @@ def _convert_pdf_pages_with_llm(path, env):
     return "\n\n".join(pages)
 
 
+def _emit_phase(phase):
+    print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
+
+
 def _convert_file(path, llm_md, env):
     """Convert one file (the .msg body or an attachment) to markdown.
 
@@ -185,9 +189,12 @@ def _convert_file(path, llm_md, env):
     to stderr rather than dumped into the note.
     """
     if llm_md is None:
+        _emit_phase("markitdown")
         return _convert_without_llm(path)
 
     is_pdf = path.lower().endswith(".pdf")
+    image_exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif")
+    _emit_phase("llm-image" if path.lower().endswith(image_exts) else "markitdown")
     try:
         result = llm_md.convert(path).text_content
         if result and result.strip():
@@ -198,6 +205,7 @@ def _convert_file(path, llm_md, env):
             return _convert_without_llm(path)
 
     if is_pdf:
+        _emit_phase("llm-image")
         result = _convert_pdf_pages_with_llm(path, env)
         if result:
             return result
