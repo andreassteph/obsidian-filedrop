@@ -372,6 +372,10 @@
   color: var(--text-muted);
 }
 
+.filedrop-status--error {
+  color: var(--text-error);
+}
+
 @keyframes filedrop-pulse {
   0%, 100% { opacity: 1; }
   50%       { opacity: 0.35; }

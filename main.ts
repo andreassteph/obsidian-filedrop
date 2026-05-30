@@ -7,6 +7,7 @@ import {
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
+	isErrorBody,
 	migrateLegacyLlmFields,
 	parsePreferredTags,
 	suggestTags,
@@ -162,8 +163,8 @@ export default class FileDropPlugin extends Plugin {
 				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
 			}
 
-			const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
-			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
 			const frontmatterLines = [
 				'---',
@@ -181,12 +182,12 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = 'converted';
+			entry.status = isErrorBody(markdownBody) ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
-			const idx = this.recentFiles.indexOf(entry);
-			if (idx >= 0) this.recentFiles.splice(idx, 1);
+			entry.status = 'error';
+			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: conversion failed — ${e instanceof Error ? e.message : String(e)}`);
 		}
@@ -227,18 +228,19 @@ export default class FileDropPlugin extends Plugin {
 			const closingIdx = content.indexOf('\n---\n');
 			if (closingIdx < 0) return;
 
-			const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
-			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 			const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
 
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
 			entry.tags = [...mergedTags];
-			entry.status = 'converted';
+			entry.status = isErrorBody(newBody) ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
-			entry.status = 'converted';
+			entry.status = 'error';
+			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
 		}

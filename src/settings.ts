@@ -42,7 +42,7 @@ export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
 	custom: { label: 'Custom (OpenAI-compatible)', baseUrl: '', keyPlaceholder: 'sk-…' },
 };
 
-export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified';
+export type FileDropStatus = 'moving' | 'converting' | 'converted' | 'verified' | 'error';
 
 export interface DroppedFile {
 	filename: string;
@@ -222,9 +222,12 @@ export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
 
 const TAG_SUGGEST_TIMEOUT_MS = 30_000;
 
+export type LlmOpError = 'insecure-url' | 'empty-content' | 'timeout' | 'api-error' | 'no-reply';
+export type LlmResult<T> = { ok: true; value: T } | { ok: false; reason: LlmOpError; detail?: string };
+
 // Conversion failures are written into the note body as callouts; we must not
 // ask the LLM to tag an error message. Matches conversionErrorBody() in convert.ts.
-function isErrorBody(content: string): boolean {
+export function isErrorBody(content: string): boolean {
 	const head = content.trimStart();
 	return head.startsWith('> [!error]') || head.startsWith('> [!warning]');
 }
@@ -280,21 +283,17 @@ function parseTagReply(raw: string, maxTags: number): string[] {
 }
 
 // Ask the configured gateway to suggest tags for converted content. Prefers the
-// user's preferred tags but may add new ones. Returns [] (never throws) when no
-// usable gateway, an insecure URL, error-body content, or any request failure —
-// callers fall back to default tags.
+// user's preferred tags but may add new ones. Never throws — callers check result.ok.
 export async function suggestTags(
 	content: string,
 	gateway: LlmGateway | null,
 	preferred: PreferredTag[],
 	options?: { maxTags?: number; maxContentChars?: number }
-): Promise<string[]> {
-	if (!gateway || !isGatewayEnabled(gateway)) return [];
-	if (!isGatewayUrlSecure(gateway.baseUrl)) {
-		new Notice('FileDrop: refusing to send the API key over an insecure connection — skipping tag suggestion.');
-		return [];
-	}
-	if (!content || isErrorBody(content)) return [];
+): Promise<LlmResult<string[]>> {
+	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+	if (!content) return { ok: false, reason: 'empty-content', detail: 'note body is empty' };
+	if (isErrorBody(content)) return { ok: false, reason: 'empty-content', detail: 'note contains a conversion error' };
 
 	const maxTags = options?.maxTags ?? 6;
 	const maxChars = options?.maxContentChars ?? 6000;
@@ -337,12 +336,21 @@ export async function suggestTags(
 
 	try {
 		const res = await Promise.race([request, timeout]);
-		if (!res) return [];
+		if (!res) return { ok: false, reason: 'timeout' };
+		if (res.status < 200 || res.status >= 300) {
+			console.error('FileDrop suggestTags: HTTP', res.status, res.text);
+			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
+		}
 		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') return [];
-		return parseTagReply(reply, maxTags);
-	} catch {
-		return [];
+		if (typeof reply !== 'string') {
+			console.error('FileDrop suggestTags: unexpected response shape', res.json);
+			return { ok: false, reason: 'no-reply' };
+		}
+		const tags = parseTagReply(reply, maxTags);
+		return { ok: true, value: tags };
+	} catch (e) {
+		console.error('FileDrop suggestTags error:', e);
+		return { ok: false, reason: 'api-error', detail: String(e) };
 	}
 }
 
@@ -356,19 +364,16 @@ function cleanSummaryReply(raw: string): string {
 }
 
 // Ask the configured gateway for a concise summary of the converted content.
-// Returns null (never throws) when there is no usable gateway, an insecure URL,
-// error-body content, or any request failure — callers surface a notice.
+// Never throws — callers check result.ok for the specific failure reason.
 export async function summarizeContent(
 	content: string,
 	gateway: LlmGateway | null,
 	options?: { maxContentChars?: number }
-): Promise<string | null> {
-	if (!gateway || !isGatewayEnabled(gateway)) return null;
-	if (!isGatewayUrlSecure(gateway.baseUrl)) {
-		new Notice('FileDrop: refusing to send the API key over an insecure connection — skipping summary.');
-		return null;
-	}
-	if (!content || isErrorBody(content)) return null;
+): Promise<LlmResult<string>> {
+	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+	if (!content) return { ok: false, reason: 'empty-content', detail: 'note body is empty' };
+	if (isErrorBody(content)) return { ok: false, reason: 'empty-content', detail: 'note contains a conversion error' };
 
 	const maxChars = options?.maxContentChars ?? 20000;
 	const body = content.slice(0, maxChars);
@@ -404,12 +409,21 @@ export async function summarizeContent(
 
 	try {
 		const res = await Promise.race([request, timeout]);
-		if (!res) return null;
+		if (!res) return { ok: false, reason: 'timeout' };
+		if (res.status < 200 || res.status >= 300) {
+			console.error('FileDrop summarize: HTTP', res.status, res.text);
+			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
+		}
 		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') return null;
+		if (typeof reply !== 'string') {
+			console.error('FileDrop summarize: unexpected response shape', res.json);
+			return { ok: false, reason: 'no-reply' };
+		}
 		const summary = cleanSummaryReply(reply);
-		return summary.length > 0 ? summary : null;
-	} catch {
-		return null;
+		if (summary.length === 0) return { ok: false, reason: 'no-reply' };
+		return { ok: true, value: summary };
+	} catch (e) {
+		console.error('FileDrop summarize error:', e);
+		return { ok: false, reason: 'api-error', detail: String(e) };
 	}
 }

@@ -1,6 +1,6 @@
 import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
 
-import { DroppedFile, VIEW_TYPE, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
+import { DroppedFile, LlmOpError, VIEW_TYPE, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import { replaceTagsBlock } from './utils';
 import type FileDropPlugin from '../main';
 
@@ -266,6 +266,17 @@ export class FileDropView extends ItemView {
 		this.renderFileList();
 	}
 
+	private llmErrorMessage(reason: LlmOpError, detail?: string): string {
+		const base: Record<LlmOpError, string> = {
+			'insecure-url': 'refusing to use an insecure gateway URL — use HTTPS or localhost',
+			'empty-content': detail ?? 'note body is empty or contains a conversion error',
+			'timeout': 'the LLM gateway timed out',
+			'api-error': detail ? `gateway error — ${detail}` : 'the gateway returned an error (see console for details)',
+			'no-reply': 'the LLM returned an empty response',
+		};
+		return base[reason];
+	}
+
 	private async summarizeEntry(entry: DroppedFile): Promise<void> {
 		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
 		if (!gateway || !isGatewayEnabled(gateway)) {
@@ -283,13 +294,13 @@ export class FileDropView extends ItemView {
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
-		const summary = await summarizeContent(body, gateway);
-		if (!summary) {
-			new Notice('FileDrop: could not generate a summary.');
+		const result = await summarizeContent(body, gateway);
+		if (!result.ok) {
+			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;
 		}
 
-		await this.writeNoteSummary(entry.notePath, summary);
+		await this.writeNoteSummary(entry.notePath, result.value);
 		new Notice('FileDrop: summary added.');
 	}
 
@@ -310,13 +321,17 @@ export class FileDropView extends ItemView {
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
-		const suggested = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags));
-		if (suggested.length === 0) {
-			new Notice('FileDrop: no tags suggested.');
+		const result = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags));
+		if (!result.ok) {
+			new Notice(`FileDrop: could not suggest tags — ${this.llmErrorMessage(result.reason, result.detail)}.`);
+			return;
+		}
+		if (result.value.length === 0) {
+			new Notice('FileDrop: the LLM suggested no tags for this content.');
 			return;
 		}
 
-		const merged = Array.from(new Set([...entry.tags, ...suggested]));
+		const merged = Array.from(new Set([...entry.tags, ...result.value]));
 		await this.updateEntryTags(index, merged);
 		new Notice('FileDrop: tags suggested.');
 	}
