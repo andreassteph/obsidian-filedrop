@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.1.20 — Improve error handling and messages
+
+### Changes
+
+- Set entry status to 'error' on conversion failure
+- Show specific reason when summary or tag suggestion fails
+
 ## 0.1.19 — Show file status during conversion
 
 ### Changes
