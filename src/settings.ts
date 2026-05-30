@@ -403,7 +403,7 @@ export async function suggestTags(
 	}
 }
 
-const SUMMARY_TIMEOUT_MS = 30_000;
+const SUMMARY_TIMEOUT_MS = 180_000; // 3 minutes — reasoning models can be slow
 
 function cleanSummaryReply(raw: string): string {
 	let text = stripThinking(raw).trim();
@@ -429,7 +429,7 @@ export async function summarizeContent(
 
 	const system =
 		'You write a concise summary of a document. ' +
-		'Respond with 1-2 plain sentences capturing the main point. ' +
+		'Capture the main point in a few plain sentences. ' +
 		'No markdown, no preamble, no labels — return only the summary text.';
 	const user = `Document content:\n${body}`;
 

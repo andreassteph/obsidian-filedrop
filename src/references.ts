@@ -24,7 +24,7 @@ export interface MatchedNote {
 	group: ReferenceConditionGroup;
 }
 
-const REFERENCE_TIMEOUT_MS = 30_000;
+const REFERENCE_TIMEOUT_MS = 60_000;
 
 export function findCandidateNotes(app: App, groups: ReferenceConditionGroup[]): GroupCandidates[] {
 	const files = app.vault.getMarkdownFiles();
