@@ -139,6 +139,7 @@ export default class FileDropPlugin extends Plugin {
 				file.type === 'application/x-msg';
 			let markdownBody: string;
 			const attachmentFrontmatterLines: string[] = [];
+			let attachmentHadError = false;
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
@@ -159,9 +160,9 @@ export default class FileDropPlugin extends Plugin {
 
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (att.markdown) {
-						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-					}
+					if (!att.markdown) continue;
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				markdownBody = bodyParts.join('\n\n');
 			} else {
@@ -190,7 +191,7 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(markdownBody) ? 'error' : 'converted';
+			entry.status = isErrorBody(markdownBody) || attachmentHadError ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
@@ -221,14 +222,15 @@ export default class FileDropPlugin extends Plugin {
 
 			const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
 			let newBody: string;
+			let attachmentHadError = false;
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (att.markdown) {
-						bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-					}
+					if (!att.markdown) continue;
+					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				newBody = bodyParts.join('\n\n');
 			} else {
@@ -251,7 +253,7 @@ export default class FileDropPlugin extends Plugin {
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(newBody) ? 'error' : 'converted';
+			entry.status = isErrorBody(newBody) || attachmentHadError ? 'error' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {

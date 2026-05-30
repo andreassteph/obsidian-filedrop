@@ -318,9 +318,29 @@ export async function runMsgConversion(
 			onPhase,
 			(error, stdout, stderr) => {
 				if (error) {
+					const unsupported = unsupportedFormatDetail(error.message);
+					if (unsupported) {
+						new Notice('FileDrop: file type not supported by markitdown.');
+						resolve({
+							body: conversionErrorBody('Unsupported file format', unsupported),
+							attachments: [],
+						});
+						return;
+					}
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({
 						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr)),
+						attachments: [],
+					});
+					return;
+				}
+				if (!stdout.trim()) {
+					const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
+					const detail = diagLines
+						? `MSG conversion exited but produced no output.\n\nDiagnostics:\n${diagLines}`
+						: 'MSG conversion exited successfully but produced no output.';
+					resolve({
+						body: conversionErrorBody('MSG conversion produced no output', detail),
 						attachments: [],
 					});
 					return;
@@ -344,7 +364,10 @@ export async function runMsgConversion(
 					});
 				} catch (e) {
 					resolve({
-						body: conversionErrorBody('MSG parse error', String(e)),
+						body: conversionErrorBody(
+							'MSG parse error',
+							`Could not parse MSG conversion output as JSON: ${e instanceof Error ? e.message : String(e)}`,
+						),
 						attachments: [],
 					});
 				}
