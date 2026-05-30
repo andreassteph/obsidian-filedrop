@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.2.0 — Sidebar redesign and improved file actions
+
+### Changes
+
+- Reorder sidebar layout: model selector moved to top, category + drop zone now collapsible
+- Add "Show verified" toggle to include verified files in the list
+- Compact file items: remove tag chips, combine Add summary / Suggest tags / add-tag input into one row
+- Enhance delete action with confirmation dialog to prevent accidental file deletion
+- Add non-destructive hide action to temporarily remove files from the list until next update
+
 ## 0.1.21 — Split conversion status and fix LLM timeout issues
 
 ### Changes
