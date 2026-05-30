@@ -1,4 +1,4 @@
-import { ItemView, Notice, TFile, WorkspaceLeaf } from 'obsidian';
+import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
 import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import { replaceTagsBlock } from './utils';
@@ -10,6 +10,8 @@ export class FileDropView extends ItemView {
 	private selectedCategory: string;
 	private selectedGatewayId: string | null = null;
 	private modelSelectEl: HTMLSelectElement | null = null;
+	private hiddenNotePaths = new Set<string>();
+	private showVerified = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
 		super(leaf);
@@ -26,8 +28,27 @@ export class FileDropView extends ItemView {
 		container.empty();
 		container.addClass('filedrop-container');
 
+		// Model / gateway selector (top)
+		const modelRow = container.createDiv({ cls: 'filedrop-category-row' });
+		modelRow.createEl('label', { cls: 'filedrop-category-label', text: 'Model' });
+		this.modelSelectEl = modelRow.createEl('select', { cls: 'filedrop-category-select' });
+		this.populateModelSelect(this.modelSelectEl);
+		this.modelSelectEl.addEventListener('change', () => {
+			this.selectedGatewayId = this.modelSelectEl!.value || null;
+		});
+
+		// Collapsible drop area (category + drop zone)
+		const dropSection = container.createDiv({ cls: 'filedrop-droparea' });
+		const dropHeader = dropSection.createDiv({ cls: 'filedrop-droparea-header' });
+		dropHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
+		dropHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Drop files' });
+		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
+		dropHeader.addEventListener('click', () => {
+			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
+		});
+
 		// Category selector
-		const categoryRow = container.createDiv({ cls: 'filedrop-category-row' });
+		const categoryRow = dropBody.createDiv({ cls: 'filedrop-category-row' });
 		categoryRow.createEl('label', { cls: 'filedrop-category-label', text: 'Category' });
 		const categorySelect = categoryRow.createEl('select', { cls: 'filedrop-category-select' });
 		this.plugin.settings.categories.forEach((cat) => {
@@ -38,34 +59,8 @@ export class FileDropView extends ItemView {
 			this.selectedCategory = categorySelect.value;
 		});
 
-		// Model / gateway selector
-		const modelRow = container.createDiv({ cls: 'filedrop-category-row' });
-		modelRow.createEl('label', { cls: 'filedrop-category-label', text: 'Model' });
-		this.modelSelectEl = modelRow.createEl('select', { cls: 'filedrop-category-select' });
-		this.populateModelSelect(this.modelSelectEl);
-		this.modelSelectEl.addEventListener('change', () => {
-			this.selectedGatewayId = this.modelSelectEl!.value || null;
-		});
-
-		// Update filelist button
-		const updateRow = container.createDiv({ cls: 'filedrop-update-row' });
-		const updateBtn = updateRow.createEl('button', {
-			cls: 'filedrop-update-btn',
-			text: '↻ Update filelist',
-		});
-		updateBtn.addEventListener('click', async () => {
-			updateBtn.disabled = true;
-			updateBtn.setText('Scanning…');
-			try {
-				await this.plugin.updateFileList();
-			} finally {
-				updateBtn.disabled = false;
-				updateBtn.setText('↻ Update filelist');
-			}
-		});
-
 		// Drop zone
-		const dropZone = container.createDiv({ cls: 'filedrop-zone' });
+		const dropZone = dropBody.createDiv({ cls: 'filedrop-zone' });
 		dropZone.createDiv({ cls: 'filedrop-icon' });
 		dropZone.createEl('p', { cls: 'filedrop-label', text: 'Drop files here' });
 		dropZone.createEl('p', {
@@ -92,6 +87,34 @@ export class FileDropView extends ItemView {
 			for (const file of Array.from(files)) {
 				await this.plugin.processDroppedFile(file, this.selectedCategory, this.selectedGatewayId);
 			}
+		});
+
+		// Update filelist row + show-verified toggle
+		const updateRow = container.createDiv({ cls: 'filedrop-update-row' });
+		const updateBtn = updateRow.createEl('button', {
+			cls: 'filedrop-update-btn',
+			text: '↻ Update filelist',
+		});
+		updateBtn.addEventListener('click', async () => {
+			updateBtn.disabled = true;
+			updateBtn.setText('Scanning…');
+			this.hiddenNotePaths.clear();
+			try {
+				await this.plugin.updateFileList();
+			} finally {
+				updateBtn.disabled = false;
+				updateBtn.setText('↻ Update filelist');
+			}
+		});
+
+		const showVerifiedLabel = updateRow.createEl('label', { cls: 'filedrop-showverified-label' });
+		const showVerifiedCheckbox = showVerifiedLabel.createEl('input', { cls: 'filedrop-showverified-checkbox' });
+		showVerifiedCheckbox.type = 'checkbox';
+		showVerifiedCheckbox.checked = this.showVerified;
+		showVerifiedLabel.appendText('Show verified');
+		showVerifiedCheckbox.addEventListener('change', () => {
+			this.showVerified = showVerifiedCheckbox.checked;
+			this.renderFileList();
 		});
 
 		// Recent files list
@@ -129,7 +152,8 @@ export class FileDropView extends ItemView {
 
 		const unverified = this.plugin.recentFiles
 			.map((entry, index) => ({ entry, index }))
-			.filter(({ entry }) => !entry.verified && entry.status !== 'verified');
+			.filter(({ entry }) => !this.hiddenNotePaths.has(entry.notePath))
+			.filter(({ entry }) => this.showVerified || (!entry.verified && entry.status !== 'verified'));
 
 		if (unverified.length === 0) {
 			this.fileListEl.createEl('p', { cls: 'filedrop-empty', text: 'No files yet.' });
@@ -174,15 +198,28 @@ export class FileDropView extends ItemView {
 		const verifiedLabel = headerRow.createEl('label', { cls: 'filedrop-verified-label' });
 		const verifiedCheckbox = verifiedLabel.createEl('input', { cls: 'filedrop-verified-checkbox' });
 		verifiedCheckbox.type = 'checkbox';
-		verifiedCheckbox.checked = false;
+		verifiedCheckbox.checked = entry.verified === true || status === 'verified';
 		verifiedCheckbox.disabled = inProgress;
 		verifiedLabel.appendText('verified');
 		verifiedCheckbox.addEventListener('change', async () => {
 			if (verifiedCheckbox.checked) await this.markVerified(index);
 		});
 
-		const removeBtn = headerRow.createEl('button', { cls: 'filedrop-entry-remove', text: '×' });
-		removeBtn.addEventListener('click', () => this.removeEntry(index));
+		const trashBtn = headerRow.createEl('button', { cls: 'filedrop-entry-trash' });
+		setIcon(trashBtn, 'trash-2');
+		trashBtn.title = 'Delete file and note';
+		trashBtn.disabled = inProgress;
+		trashBtn.addEventListener('click', () => {
+			new ConfirmModal(
+				this.app,
+				`Delete "${entry.filename}" and its note? This cannot be undone.`,
+				() => this.removeEntry(index),
+			).open();
+		});
+
+		const hideBtn = headerRow.createEl('button', { cls: 'filedrop-entry-hide', text: '×' });
+		hideBtn.title = 'Hide until next update';
+		hideBtn.addEventListener('click', () => this.hideEntry(entry));
 
 		const rerunBtn = headerRow.createEl('button', { cls: 'filedrop-entry-rerun', text: '↺' });
 		rerunBtn.title = 'Re-run conversion';
@@ -220,16 +257,7 @@ export class FileDropView extends ItemView {
 			}
 		});
 
-		const tagsRow = entryEl.createDiv({ cls: 'filedrop-entry-tags' });
-		entry.tags.forEach((tag, tagIndex) => {
-			const chip = tagsRow.createEl('span', { cls: 'filedrop-tag-chip', text: tag });
-			chip.addEventListener('click', () => {
-				const newTags = entry.tags.filter((_, i) => i !== tagIndex);
-				this.updateEntryTags(index, newTags);
-			});
-		});
-
-		const tagInput = tagsRow.createEl('input', { cls: 'filedrop-tag-input' });
+		const tagInput = summaryRow.createEl('input', { cls: 'filedrop-tag-input' });
 		tagInput.type = 'text';
 		tagInput.placeholder = 'add tag…';
 		tagInput.addEventListener('keydown', async (e) => {
@@ -240,6 +268,11 @@ export class FileDropView extends ItemView {
 				}
 			}
 		});
+	}
+
+	private hideEntry(entry: DroppedFile): void {
+		this.hiddenNotePaths.add(entry.notePath);
+		this.renderFileList();
 	}
 
 	private async updateEntryTags(index: number, newTags: string[]): Promise<void> {
@@ -369,5 +402,32 @@ export class FileDropView extends ItemView {
 		const content = await this.app.vault.read(file);
 		const updated = content.replace(/^verified:.*$/m, 'verified: true');
 		await this.app.vault.modify(file, updated);
+	}
+}
+
+class ConfirmModal extends Modal {
+	private message: string;
+	private onConfirm: () => void;
+
+	constructor(app: App, message: string, onConfirm: () => void) {
+		super(app);
+		this.message = message;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('p', { text: this.message });
+		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
+		const cancelBtn = buttons.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => this.close());
+		const deleteBtn = buttons.createEl('button', { cls: 'mod-warning', text: 'Delete' });
+		deleteBtn.addEventListener('click', () => {
+			this.close();
+			this.onConfirm();
+		});
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }

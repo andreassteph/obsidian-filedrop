@@ -38,12 +38,76 @@
   border-color: var(--interactive-accent);
 }
 
+/* Collapsible drop area */
+
+.filedrop-droparea {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.filedrop-droparea-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.filedrop-droparea-caret {
+  display: inline-block;
+  transition: transform 120ms ease;
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.filedrop-droparea--collapsed .filedrop-droparea-caret {
+  transform: rotate(-90deg);
+}
+
+.filedrop-droparea-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.filedrop-droparea--collapsed {
+  flex: 0 0 auto;
+}
+
+.filedrop-droparea--collapsed .filedrop-droparea-body {
+  display: none;
+}
+
 /* Update filelist button */
 
 .filedrop-update-row {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   flex-shrink: 0;
+}
+
+.filedrop-showverified-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.filedrop-showverified-checkbox {
+  cursor: pointer;
 }
 
 /* Drop zone */
@@ -169,7 +233,34 @@
   text-decoration: underline;
 }
 
-.filedrop-entry-remove {
+.filedrop-entry-trash {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-faint);
+  line-height: 1;
+  padding: 0 2px;
+  flex-shrink: 0;
+  box-shadow: none;
+  display: inline-flex;
+  align-items: center;
+}
+
+.filedrop-entry-trash svg {
+  width: 14px;
+  height: 14px;
+}
+
+.filedrop-entry-trash:hover {
+  color: var(--text-error);
+}
+
+.filedrop-entry-trash:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.filedrop-entry-hide {
   background: none;
   border: none;
   cursor: pointer;
@@ -181,8 +272,8 @@
   box-shadow: none;
 }
 
-.filedrop-entry-remove:hover {
-  color: var(--text-error);
+.filedrop-entry-hide:hover {
+  color: var(--text-normal);
 }
 
 .filedrop-entry-rerun {
@@ -208,6 +299,8 @@
 
 .filedrop-entry-summary-row {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 6px;
 }
 
@@ -240,28 +333,6 @@
 }
 
 /* Tags */
-
-.filedrop-entry-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  align-items: center;
-}
-
-.filedrop-tag-chip {
-  font-size: var(--font-ui-smaller);
-  background-color: var(--tag-background);
-  color: var(--tag-color);
-  border-radius: 4px;
-  padding: 1px 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.filedrop-tag-chip:hover {
-  background-color: var(--background-modifier-error);
-  color: var(--text-error);
-}
 
 .filedrop-tag-input {
   font-size: var(--font-ui-smaller);
@@ -397,4 +468,13 @@
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+/* Confirm modal */
+
+.filedrop-confirm-buttons {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
