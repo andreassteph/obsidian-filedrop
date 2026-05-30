@@ -162,8 +162,8 @@ export default class FileDropPlugin extends Plugin {
 				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway);
 			}
 
-			const suggested = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
-			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
 			const frontmatterLines = [
 				'---',
@@ -227,8 +227,8 @@ export default class FileDropPlugin extends Plugin {
 			const closingIdx = content.indexOf('\n---\n');
 			if (closingIdx < 0) return;
 
-			const suggested = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
-			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...suggested]));
+			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 			const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
 
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
