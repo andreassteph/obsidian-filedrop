@@ -204,6 +204,7 @@ def _convert_pdf_pages_with_llm(path, env):
         try:
             resp = client.chat.completions.create(
                 model=env["FILEDROP_LLM_MODEL"],
+                max_tokens=2048,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -237,6 +238,7 @@ def describe(path, env):
     prompt = (env.get("FILEDROP_DESCRIBE_PROMPT") or DEFAULT_DESCRIBE_PROMPT).format(filename=filename)
     response = client.chat.completions.create(
         model=env["FILEDROP_LLM_MODEL"],
+        max_tokens=200,
         messages=[{"role": "user", "content": prompt}],
     )
     return response.choices[0].message.content or ""

@@ -373,6 +373,7 @@ export async function suggestTags(
 		body: JSON.stringify({
 			model: gateway.model,
 			temperature: 0,
+			max_tokens: 150,
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
@@ -446,6 +447,7 @@ export async function summarizeContent(
 		body: JSON.stringify({
 			model: gateway.model,
 			temperature: 0,
+			max_tokens: 600,
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },

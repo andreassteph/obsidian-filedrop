@@ -181,6 +181,7 @@ def _convert_pdf_pages_with_llm(path, env):
         try:
             resp = client.chat.completions.create(
                 model=env["FILEDROP_LLM_MODEL"],
+                max_tokens=2048,
                 messages=[{
                     "role": "user",
                     "content": [
