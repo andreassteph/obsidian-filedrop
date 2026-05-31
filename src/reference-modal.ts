@@ -89,7 +89,7 @@ export class ReferenceModal extends Modal {
 				summary: this.summary,
 				title: this.noteFile.basename,
 				people: (this.metadata.people ?? []).join(', '),
-				note_link: `[[${this.noteFile.basename}]]`,
+				note_link: `[[${this.noteFile.path.replace(/\.md$/, '')}]]`,
 			};
 
 			let count = 0;
