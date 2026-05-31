@@ -69,6 +69,19 @@ export class FileDropSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Extensions to describe with LLM')
+			.setDesc('Comma-separated file extensions (e.g. .exe, .dll, .bin) that skip markitdown and are described by the LLM based on filename. Requires an LLM gateway to be configured.')
+			.addText((text) =>
+				text
+					.setPlaceholder('.exe, .dll, .bin')
+					.setValue(this.plugin.settings.describeExtensions)
+					.onChange(async (value) => {
+						this.plugin.settings.describeExtensions = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
 			.setName('Preferred tags')
 			.setDesc('One per line as "tag: description". After conversion the LLM is asked to prefer these tags.')
 			.addTextArea((text) =>

@@ -103,18 +103,6 @@ const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
 // each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
 const MSG_LLM_TIMEOUT_MS = 720_000;
 
-// The binary/executable family markitdown reports as unsupported.
-const EXECUTABLE_EXTS = new Set([
-	'.exe', '.ocx', '.scr', '.acm', '.olb', '.fon', '.vxd', '.386',
-	'.cpl', '.com', '.dll', '.drv', '.pif', '.qts', '.qtx', '.sys',
-	'.vbx', '.ax',
-]);
-
-function isExecutableFile(path: string): boolean {
-	const i = path.lastIndexOf('.');
-	return i >= 0 && EXECUTABLE_EXTS.has(path.slice(i).toLowerCase());
-}
-
 function conversionErrorBody(title: string, detail: string): string {
 	return `> [!error] Conversion error: ${title}\n> ${detail.replace(/\n/g, '\n> ')}`;
 }
@@ -188,12 +176,12 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 			(error: Error | null, stdout: string) => {
 				if (error || !stdout.trim()) {
 					new Notice('FileDrop: unsupported file type — see note for details.');
-					resolve(conversionErrorBody('Unsupported file format', 'markitdown cannot convert executable files.'));
+					resolve(conversionErrorBody('Unsupported file format', 'markitdown cannot convert this file type.'));
 					return;
 				}
 				resolve([
 					'> [!warning] Unsupported file format — could not convert',
-					"> markitdown can't read executable files. Best guess from the filename (may be inaccurate):",
+					"> markitdown can't convert this file type. Best guess from the filename (may be inaccurate):",
 					'',
 					stdout.trim(),
 				].join('\n'));
@@ -207,7 +195,20 @@ export async function runMarkitdown(
 	pythonCommand: string,
 	gateway: LlmGateway | null,
 	onPhase?: OnPhase,
+	describeExtensions?: string,
 ): Promise<string> {
+	const dotIdx = absolutePath.lastIndexOf('.');
+	const fileExt = dotIdx >= 0 ? absolutePath.slice(dotIdx).toLowerCase() : '';
+	const describeExts = describeExtensions
+		? new Set(describeExtensions.split(',').map(s => s.trim().toLowerCase()).filter(Boolean))
+		: null;
+	const shouldDescribe = describeExts !== null && describeExts.has(fileExt);
+
+	// Layer 1: skip markitdown entirely for known binary extensions.
+	if (shouldDescribe) {
+		return describeExecutable(absolutePath, pythonCommand, gateway);
+	}
+
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
@@ -226,6 +227,7 @@ export async function runMarkitdown(
 						FILEDROP_LLM_MODEL: gateway.model,
 						FILEDROP_LLM_PROMPT: gateway.prompt,
 						FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
+						FILEDROP_DESCRIBE_EXTS: describeExtensions,
 					},
 				},
 				onPhase,
@@ -233,7 +235,8 @@ export async function runMarkitdown(
 					if (error) {
 						const unsupported = unsupportedFormatDetail(error.message);
 						if (unsupported) {
-							if (isExecutableFile(absolutePath)) {
+							// Layer 2: markitdown flagged the format as unsupported — try describe.
+							if (shouldDescribe) {
 								describeExecutable(absolutePath, pythonCommand, gateway).then(resolve);
 								return;
 							}
@@ -246,6 +249,11 @@ export async function runMarkitdown(
 						return;
 					}
 					if (!stdout.trim()) {
+						// Layer 3: markitdown ran but produced nothing (e.g. binary file) — try describe.
+						if (shouldDescribe) {
+							describeExecutable(absolutePath, pythonCommand, gateway).then(resolve);
+							return;
+						}
 						const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
 						const detail = diagLines
 							? `markitdown exited but returned empty content.\n\nDiagnostics:\n${diagLines}`

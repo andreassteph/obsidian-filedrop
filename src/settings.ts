@@ -32,6 +32,7 @@ export interface FileDropSettings {
 	categories: string[];
 	defaultTags: string[];
 	preferredTags: string;
+	describeExtensions: string;
 	llmGateways: LlmGateway[];
 	pythonCommand: string;
 	referenceGroups: ReferenceConditionGroup[];
@@ -111,6 +112,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
 	preferredTags: '',
+	describeExtensions: '.exe, .dll, .ocx, .scr, .acm, .olb, .fon, .vxd, .386, .cpl, .com, .drv, .pif, .qts, .qtx, .sys, .vbx, .ax, .bin, .so, .dylib, .o, .a, .lib, .out',
 	llmGateways: [],
 	pythonCommand: 'python3',
 	referenceGroups: [],

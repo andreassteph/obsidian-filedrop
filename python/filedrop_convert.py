@@ -247,8 +247,23 @@ def describe(path, env):
 def main(argv=None, env=None):
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
-    action = describe if env.get("FILEDROP_DESCRIBE") else convert
-    sys.stdout.buffer.write(action(argv[1], env).encode("utf-8"))
+    path = argv[1]
+    if env.get("FILEDROP_DESCRIBE"):
+        result = describe(path, env)
+    else:
+        ext = os.path.splitext(path)[1].lower()
+        describe_exts = {e.strip().lower() for e in env.get("FILEDROP_DESCRIBE_EXTS", "").split(",") if e.strip()}
+        if ext and ext in describe_exts:
+            desc = describe(path, env)
+            result = (
+                "> [!warning] Unsupported file format — could not convert\n"
+                "> markitdown can't convert this file type. Best guess from the filename (may be inaccurate):\n"
+                "\n"
+                + desc
+            ) if desc else ""
+        else:
+            result = convert(path, env)
+    sys.stdout.buffer.write(result.encode("utf-8"))
 
 
 if __name__ == "__main__":

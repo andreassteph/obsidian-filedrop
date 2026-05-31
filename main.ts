@@ -190,9 +190,32 @@ export default class FileDropPlugin extends Plugin {
 					this.getActiveView()?.renderFileList();
 				};
 
+				const isMsgFile =
+					rawName.toLowerCase().endsWith('.msg') ||
+					file.type === 'application/vnd.ms-outlook' ||
+					file.type === 'application/x-msg';
+
 				let markdown: string;
 				try {
-					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+					if (isMsgFile) {
+						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+						const attParts: string[] = [msgResult.body];
+						for (const att of msgResult.attachments) {
+							if (!att.markdown) continue;
+							const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
+							const attBuf = Buffer.from(att.dataB64, 'base64');
+							const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+							await vault.adapter.writeBinary(attPath, ab);
+							attachmentFrontmatterLines.push(
+								`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
+							);
+							attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+							if (isErrorBody(att.markdown)) anyError = true;
+						}
+						markdown = attParts.join('\n\n');
+					} else {
+						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+					}
 					if (isErrorBody(markdown)) anyError = true;
 				} catch (e) {
 					markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
@@ -362,7 +385,7 @@ export default class FileDropPlugin extends Plugin {
 				}
 				markdownBody = bodyParts.join('\n\n');
 			} else {
-				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
 			}
 
 			entry.status = 'converting-llm-tags';
@@ -430,7 +453,7 @@ export default class FileDropPlugin extends Plugin {
 				}
 				newBody = bodyParts.join('\n\n');
 			} else {
-				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
 			}
 
 			entry.status = 'converting-llm-tags';
