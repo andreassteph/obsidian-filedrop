@@ -299,52 +299,36 @@ export class FileDropView extends ItemView {
 		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
 
 		let metadata = extractActivityMetadata(body, entry.filePath, noteFile.stat);
-
-		if (gateway && isGatewayEnabled(gateway)) {
-			const hasNull = metadata.date === null || metadata.type === null || metadata.people === null;
-			if (hasNull) {
-				const result = await fillMetadataWithLLM(metadata, body, gateway);
-				if (result.ok) metadata = result.value;
-			}
-		}
-
-		// Get or generate summary
-		let summary = this.app.metadataCache.getFileCache(noteFile)?.frontmatter?.summary ?? '';
-		if (!summary && gateway && isGatewayEnabled(gateway)) {
-			const result = await summarizeContent(body, gateway);
-			if (result.ok) {
-				await this.writeNoteSummary(entry.notePath, result.value);
-				summary = result.value;
-			}
-		}
-
+		const existingSummary: string = this.app.metadataCache.getFileCache(noteFile)?.frontmatter?.summary ?? '';
 		const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
-		let matchedNotes: MatchedNote[] = [];
 
-		if (gateway && isGatewayEnabled(gateway)) {
-			const result = await matchCandidatesWithLLM(
-				body,
-				groupCandidates,
-				gateway,
-				this.plugin.settings.referenceMaxMatches,
-			);
-			if (result.ok) {
-				matchedNotes = result.value;
-			} else {
-				new Notice(`FileDrop: matching failed — ${this.llmErrorMessage(result.reason, result.detail)}. Showing all candidates.`);
-				// Fall back to all candidates unranked
-				const seen = new Set<string>();
-				for (const { group, candidates } of groupCandidates) {
-					for (const candidate of candidates) {
-						if (!seen.has(candidate.file.path)) {
-							seen.add(candidate.file.path);
-							matchedNotes.push({ candidate, group });
-						}
-					}
-				}
-			}
-		} else {
-			// No LLM — show all candidates unranked
+		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
+		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+
+		// Run all three LLM calls in parallel — they are independent of each other.
+		const [metadataResult, summaryResult, matchResult] = await Promise.all([
+			gatewayActive && hasNullMetadata ? fillMetadataWithLLM(metadata, body, gateway!) : Promise.resolve(null),
+			gatewayActive && !existingSummary ? summarizeContent(body, gateway!) : Promise.resolve(null),
+			gatewayActive ? matchCandidatesWithLLM(body, groupCandidates, gateway!, this.plugin.settings.referenceMaxMatches) : Promise.resolve(null),
+		]);
+
+		if (metadataResult?.ok) metadata = metadataResult.value;
+
+		let summary = existingSummary;
+		if (summaryResult?.ok) {
+			await this.writeNoteSummary(entry.notePath, summaryResult.value);
+			summary = summaryResult.value;
+		}
+
+		let matchedNotes: MatchedNote[] = [];
+		if (matchResult?.ok) {
+			matchedNotes = matchResult.value;
+		} else if (matchResult && !matchResult.ok) {
+			new Notice(`FileDrop: matching failed — ${this.llmErrorMessage(matchResult.reason, matchResult.detail)}. Showing all candidates.`);
+		}
+
+		// No gateway, or matching failed — show all candidates unranked
+		if (!gatewayActive || (matchResult && !matchResult.ok)) {
 			const seen = new Set<string>();
 			for (const { group, candidates } of groupCandidates) {
 				for (const candidate of candidates) {

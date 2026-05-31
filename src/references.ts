@@ -24,7 +24,7 @@ export interface MatchedNote {
 	group: ReferenceConditionGroup;
 }
 
-const REFERENCE_TIMEOUT_MS = 30_000;
+const REFERENCE_TIMEOUT_MS = 60_000;
 
 export function findCandidateNotes(app: App, groups: ReferenceConditionGroup[]): GroupCandidates[] {
 	const files = app.vault.getMarkdownFiles();
@@ -157,6 +157,7 @@ export async function fillMetadataWithLLM(
 		body: JSON.stringify({
 			model: gateway.model,
 			temperature: 0,
+			max_tokens: 300,
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
@@ -233,6 +234,7 @@ export async function matchCandidatesWithLLM(
 		body: JSON.stringify({
 			model: gateway.model,
 			temperature: 0,
+			max_tokens: 120,
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
