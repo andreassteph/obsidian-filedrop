@@ -298,29 +298,48 @@ export class FileDropView extends ItemView {
 		const fmEnd = content.indexOf('\n---\n');
 		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
 
-		let metadata = extractActivityMetadata(body, entry.filePath, noteFile.stat);
-		const existingSummary: string = this.app.metadataCache.getFileCache(noteFile)?.frontmatter?.summary ?? '';
-		const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
+		const rawFm = this.app.metadataCache.getFileCache(noteFile)?.frontmatter ?? {};
+		const existingSummary: string = rawFm.summary ?? '';
 
-		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
-		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+		// Build metadata from cached fields if they exist, otherwise extract fresh
+		let metadata: { date: string | null; type: string | null; people: string[] | null };
+		const hasCachedDate = 'file_date' in rawFm && rawFm.file_date;
+		const hasCachedType = 'file_type' in rawFm && rawFm.file_type;
+		const hasCachedPeople = 'file_people' in rawFm && rawFm.file_people;
 
-		// Phase 1: Run metadata fill + summary in parallel (independent of each other)
-		const [metadataResult, summaryResult] = await Promise.all([
-			gatewayActive && hasNullMetadata ? fillMetadataWithLLM(metadata, body, gateway!) : Promise.resolve(null),
-			gatewayActive && !existingSummary ? summarizeContent(body, gateway!) : Promise.resolve(null),
-		]);
+		if (hasCachedDate && hasCachedType && hasCachedPeople) {
+			// Use cached metadata if all fields exist
+			metadata = {
+				date: String(rawFm.file_date),
+				type: String(rawFm.file_type),
+				people: Array.isArray(rawFm.file_people) ? rawFm.file_people.map(String) : null,
+			};
+		} else {
+			// Extract fresh and optionally fill gaps
+			metadata = extractActivityMetadata(body, entry.filePath, noteFile.stat);
+			const gatewayActive = !!gateway && isGatewayEnabled(gateway);
+			const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
 
-		if (metadataResult?.ok) metadata = metadataResult.value;
-
-		let summary = existingSummary;
-		if (summaryResult?.ok) {
-			await this.writeNoteSummary(entry.notePath, summaryResult.value);
-			summary = summaryResult.value;
+			if (gatewayActive && hasNullMetadata) {
+				const fillResult = await fillMetadataWithLLM(metadata, body, gateway!);
+				if (fillResult.ok) metadata = fillResult.value;
+			}
 		}
 
-		// Phase 2: Build frontmatter with summary, then match references
-		const rawFm: Record<string, unknown> = this.app.metadataCache.getFileCache(noteFile)?.frontmatter ?? {};
+		const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
+		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
+
+		// Generate summary if missing
+		let summary = existingSummary;
+		if (gatewayActive && !existingSummary) {
+			const summaryResult = await summarizeContent(body, gateway!);
+			if (summaryResult.ok) {
+				await this.writeNoteSummary(entry.notePath, summaryResult.value);
+				summary = summaryResult.value;
+			}
+		}
+
+		// Build full frontmatter for matching
 		const noteFrontmatter: Record<string, unknown> = { ...rawFm };
 		if (summary) noteFrontmatter['summary'] = summary;
 
@@ -411,13 +430,23 @@ export class FileDropView extends ItemView {
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
+		// Extract summary
 		const result = await summarizeContent(body, gateway);
 		if (!result.ok) {
 			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;
 		}
 
-		await this.writeNoteSummary(entry.notePath, result.value);
+		// Extract metadata and optionally fill gaps with LLM
+		let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
+		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+		if (isGatewayEnabled(gateway) && hasNullMetadata) {
+			const fillResult = await fillMetadataWithLLM(metadata, body, gateway);
+			if (fillResult.ok) metadata = fillResult.value;
+		}
+
+		// Save summary and metadata to frontmatter
+		await this.writeNoteSummaryAndMetadata(entry.notePath, result.value, metadata);
 		new Notice('FileDrop: summary added.');
 	}
 
@@ -466,6 +495,48 @@ export class FileDropView extends ItemView {
 			if (c < 0) return;
 			updated = content.slice(0, c) + '\n' + line + content.slice(c);
 		}
+		await this.app.vault.modify(file, updated);
+	}
+
+	private async writeNoteSummaryAndMetadata(
+		notePath: string,
+		summary: string,
+		metadata: { date: string | null; type: string | null; people: string[] | null },
+	): Promise<void> {
+		const file = this.app.vault.getAbstractFileByPath(notePath);
+		if (!(file instanceof TFile)) return;
+		const content = await this.app.vault.read(file);
+
+		const fmEndIndex = content.indexOf('\n---\n');
+		if (fmEndIndex < 0) return;
+
+		const fmStart = content.slice(0, fmEndIndex);
+		const fmBody = content.slice(fmEndIndex);
+
+		// Build replacement lines for frontmatter fields
+		const lines: string[] = [];
+		lines.push(`summary: ${JSON.stringify(summary)}`);
+		if (metadata.date) lines.push(`file_date: ${JSON.stringify(metadata.date)}`);
+		if (metadata.type) lines.push(`file_type: ${JSON.stringify(metadata.type)}`);
+		if (metadata.people && metadata.people.length > 0) {
+			lines.push(`file_people: [${metadata.people.map((p) => JSON.stringify(p)).join(', ')}]`);
+		}
+
+		const newLines = lines.join('\n');
+
+		// Replace existing lines or add new ones
+		let updated = fmStart;
+		for (const line of lines) {
+			const field = line.split(':')[0];
+			const fieldRegex = new RegExp(`^${field}:.*$`, 'm');
+			if (fieldRegex.test(updated)) {
+				updated = updated.replace(fieldRegex, line);
+			} else {
+				updated += '\n' + line;
+			}
+		}
+		updated += fmBody;
+
 		await this.app.vault.modify(file, updated);
 	}
 

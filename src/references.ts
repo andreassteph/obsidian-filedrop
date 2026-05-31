@@ -91,7 +91,7 @@ export function extractActivityMetadata(
 		if (named) date = toIso(named[3], MONTH_MAP[named[1].toLowerCase()] ?? '01', named[2]);
 	}
 	if (!date) {
-		date = new Date(fileStat.ctime).toISOString().slice(0, 10);
+		date = new Date(fileStat.ctime).toISOString().slice(0, 7);
 	}
 
 	let type: string | null = null;
