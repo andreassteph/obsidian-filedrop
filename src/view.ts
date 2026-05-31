@@ -68,6 +68,7 @@ export class FileDropView extends ItemView {
 		categorySelect.addEventListener('change', () => {
 			this.selectedCategory = categorySelect.value;
 		});
+		categorySelect.addEventListener('click', (e) => e.stopPropagation());
 		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
 		dropHeader.addEventListener('click', () => {
 			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));

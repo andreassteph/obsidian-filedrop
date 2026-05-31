@@ -6,6 +6,8 @@ import { LlmGateway, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const path = require('path') as typeof import('path');
 
 export type ConvertPhase = 'markitdown' | 'llm-image';
 export type OnPhase = (phase: ConvertPhase) => void;
@@ -110,10 +112,11 @@ function conversionErrorBody(title: string, detail: string): string {
 // markitdown raises UnsupportedFormatException for file types it can't handle
 // (e.g. .exe). Node appends the subprocess stderr to error.message, so detect
 // that line and surface it instead of the full traceback.
-function unsupportedFormatDetail(message: string): string | null {
+function unsupportedFormatDetail(message: string, fileName?: string): string | null {
 	if (!message.includes('UnsupportedFormatException')) return null;
 	const m = message.match(/UnsupportedFormatException:\s*(.+)/);
-	return m ? m[1].trim() : 'This file type is not supported by markitdown.';
+	const detail = m ? m[1].trim() : 'This file type is not supported by markitdown.';
+	return fileName ? `${fileName}: ${detail}` : detail;
 }
 
 // execFile sets error.message to "Command failed: <cmd>\n<stderr>". Because the
@@ -173,10 +176,15 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 					FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 				},
 			},
-			(error: Error | null, stdout: string) => {
+			(error: Error | null, stdout: string, stderr: string) => {
 				if (error || !stdout.trim()) {
-					new Notice('FileDrop: unsupported file type — see note for details.');
-					resolve(conversionErrorBody('Unsupported file format', 'markitdown cannot convert this file type.'));
+					const fileName = path.basename(absolutePath);
+					const errorDetail = stderr?.trim() || error?.message || 'Unknown error.';
+					new Notice(`FileDrop: describe failed for ${fileName} — see note for details.`);
+					resolve(conversionErrorBody(
+						`Describe failed — ${fileName}`,
+						`The LLM describe step failed for this file.\n\n${errorDetail}`
+					));
 					return;
 				}
 				resolve([
@@ -233,7 +241,7 @@ export async function runMarkitdown(
 				onPhase,
 				(error, stdout, stderr) => {
 					if (error) {
-						const unsupported = unsupportedFormatDetail(error.message);
+						const unsupported = unsupportedFormatDetail(error.message, path.basename(absolutePath));
 						if (unsupported) {
 							// Layer 2: markitdown flagged the format as unsupported — try describe.
 							if (shouldDescribe) {
@@ -274,7 +282,7 @@ export async function runMarkitdown(
 			{ timeout: MARKITDOWN_TIMEOUT_MS, env: { ...process.env, PYTHONUTF8: '1' } },
 			(error: Error | null, stdout: string, stderr: string) => {
 				if (error) {
-					const unsupported = unsupportedFormatDetail(error.message);
+					const unsupported = unsupportedFormatDetail(error.message, path.basename(absolutePath));
 					if (unsupported) {
 						new Notice('FileDrop: file type not supported by markitdown.');
 						resolve(conversionErrorBody('Unsupported file format', unsupported));
@@ -360,7 +368,7 @@ export async function runMsgConversion(
 			onPhase,
 			(error, stdout, stderr) => {
 				if (error) {
-					const unsupported = unsupportedFormatDetail(error.message);
+					const unsupported = unsupportedFormatDetail(error.message, path.basename(absolutePath));
 					if (unsupported) {
 						new Notice('FileDrop: file type not supported by markitdown.');
 						resolve({
