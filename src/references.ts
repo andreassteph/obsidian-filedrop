@@ -243,7 +243,7 @@ export async function matchCandidatesWithLLM(
 		body: JSON.stringify({
 			model: gateway.model,
 			temperature: 0,
-			max_tokens: 120,
+			max_tokens: 2000,
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
