@@ -305,11 +305,10 @@ export class FileDropView extends ItemView {
 		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
 		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
 
-		// Run all three LLM calls in parallel — they are independent of each other.
-		const [metadataResult, summaryResult, matchResult] = await Promise.all([
+		// Phase 1: Run metadata fill + summary in parallel (independent of each other)
+		const [metadataResult, summaryResult] = await Promise.all([
 			gatewayActive && hasNullMetadata ? fillMetadataWithLLM(metadata, body, gateway!) : Promise.resolve(null),
 			gatewayActive && !existingSummary ? summarizeContent(body, gateway!) : Promise.resolve(null),
-			gatewayActive ? matchCandidatesWithLLM(body, groupCandidates, gateway!, this.plugin.settings.referenceMaxMatches) : Promise.resolve(null),
 		]);
 
 		if (metadataResult?.ok) metadata = metadataResult.value;
@@ -319,6 +318,15 @@ export class FileDropView extends ItemView {
 			await this.writeNoteSummary(entry.notePath, summaryResult.value);
 			summary = summaryResult.value;
 		}
+
+		// Phase 2: Build frontmatter with summary, then match references
+		const rawFm: Record<string, unknown> = this.app.metadataCache.getFileCache(noteFile)?.frontmatter ?? {};
+		const noteFrontmatter: Record<string, unknown> = { ...rawFm };
+		if (summary) noteFrontmatter['summary'] = summary;
+
+		const matchResult = gatewayActive
+			? await matchCandidatesWithLLM(body, noteFrontmatter, groupCandidates, gateway!, this.plugin.settings.referenceMaxMatches)
+			: null;
 
 		let matchedNotes: MatchedNote[] = [];
 		if (matchResult?.ok) {

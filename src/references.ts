@@ -193,6 +193,7 @@ export async function fillMetadataWithLLM(
 
 export async function matchCandidatesWithLLM(
 	noteContent: string,
+	noteFrontmatter: Record<string, unknown>,
 	groupCandidates: GroupCandidates[],
 	gateway: LlmGateway,
 	maxMatches: number,
@@ -215,11 +216,19 @@ export async function matchCandidatesWithLLM(
 		return `[${i}] ${candidate.name}${fields ? ' | ' + fields : ''} (group: ${group.name})`;
 	});
 
+	const fmLines = Object.entries(noteFrontmatter)
+		.filter(([, v]) => v !== null && v !== undefined && v !== false)
+		.map(([k, v]) => `${k}: ${Array.isArray(v) ? v.join(', ') : String(v)}`)
+		.join('\n');
+
 	const system =
-		'You help match a document to relevant notes. ' +
-		`Return a JSON array of up to ${maxMatches} integer indices identifying the most relevant notes (best match first). ` +
-		'Return ONLY the JSON array, e.g. [2, 0, 5]. If no notes are relevant, return [].';
-	const user = `Document (excerpt):\n${noteContent.slice(0, 4000)}\n\nCandidate notes:\n${lines.join('\n')}`;
+		'You help organize documents by linking them to related notes in a knowledge base. ' +
+		'Select notes that this document most naturally belongs with, connects to, or would be useful to reference — ' +
+		'including indirect relationships (e.g. an installer relates to a software collection, a receipt to a purchase record, a transcript to a project). ' +
+		`Return a JSON array of up to ${maxMatches} integer indices, best match first. ` +
+		'Return ONLY the JSON array, e.g. [2, 0, 5]. Return [] only if there is truly no plausible connection to any candidate.';
+	const user = (fmLines ? `Document metadata:\n${fmLines}\n\n` : '') +
+		`Document body (excerpt):\n${noteContent.slice(0, 4000)}\n\nCandidate notes:\n${lines.join('\n')}`;
 
 	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
 	const request = requestUrl({
