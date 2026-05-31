@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.3.0 — Add file grouping mode and configurable binary file descriptions
+
+### Changes
+
+- Add file grouping mode to batch-drop multiple files into a single note
+- Add configurable `describe-extensions` setting to control which binary file types get LLM descriptions
+- Fix `.group/` folders creating one note per file instead of one note per group
+- Improve error messages for unsupported formats and surface describe failures
+
 ## 0.2.2 — Add note references and performance improvements
 
 ### Changes
