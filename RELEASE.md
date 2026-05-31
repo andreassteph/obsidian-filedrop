@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.2.2 — Add note references and performance improvements
+
+### Changes
+
+- Add note references — automatically link converted notes to related vault notes
+- Improve reference matching with frontmatter context and activity metadata caching
+- Performance: parallelize reference LLM calls, add max_tokens caps, extend summary timeout
+- Fix wiki link references to use full markdown note paths
+
 ## 0.2.1 — Sidebar layout optimizations and smarter filelist refresh
 
 ### Changes
