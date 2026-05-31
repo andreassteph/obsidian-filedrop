@@ -560,7 +560,8 @@ export default class FileDropPlugin extends Plugin {
 		const rawFiles = vault.getFiles().filter((f) =>
 			f.path.startsWith(incomingDir + '/') &&
 			!f.path.endsWith('.md') &&
-			!f.path.includes('.attachments/')
+			!f.path.includes('.attachments/') &&
+			!f.path.includes('.group/')
 		);
 		for (const file of rawFiles) {
 			if (trackedFilePaths.has(file.path)) continue;
@@ -595,6 +596,73 @@ export default class FileDropPlugin extends Plugin {
 			});
 			trackedNotePaths.add(notePath);
 			trackedFilePaths.add(file.path);
+			added++;
+		}
+
+		// Find untracked .group/ directories and create one note per group
+		const groupDirs = new Map<string, { dir: string; files: TFile[]; minCtime: number }>();
+		for (const file of vault.getFiles().filter((f) => f.path.includes('.group/'))) {
+			const groupMatch = file.path.match(/^(.+\.group)(\/|$)/);
+			if (!groupMatch) continue;
+			const groupDirPath = groupMatch[1];
+			if (trackedFilePaths.has(groupDirPath)) continue;
+
+			if (!groupDirs.has(groupDirPath)) {
+				groupDirs.set(groupDirPath, {
+					dir: groupDirPath,
+					files: [],
+					minCtime: file.stat.ctime,
+				});
+			}
+			const entry = groupDirs.get(groupDirPath)!;
+			entry.files.push(file);
+			entry.minCtime = Math.min(entry.minCtime, file.stat.ctime);
+		}
+
+		for (const { dir: groupDirPath, files: groupFiles, minCtime } of groupDirs.values()) {
+			if (groupFiles.length === 0) continue;
+
+			const groupDirName = groupDirPath.split('/').pop()!;
+			const groupBaseName = groupDirName.replace(/\.group$/, '');
+			const pathParts = groupDirPath.slice(incomingDir.length + 1).split('/');
+			const monthSlug = pathParts[0] ?? '';
+			const subfolderPath = groupDirPath.slice(0, groupDirPath.lastIndexOf('/'));
+			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
+
+			let noteName = noteNameFromFile(groupDirName);
+			let notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
+			let dupIdx = 1;
+			while (await vault.adapter.exists(notePath)) {
+				dupIdx++;
+				noteName = noteNameFromFile(dedupeName(groupDirName, dupIdx));
+				notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
+			}
+
+			if (trackedNotePaths.has(notePath)) continue;
+
+			if (!(await vault.adapter.exists(notePath))) {
+				await vault.create(notePath, [
+					'---',
+					`original-file: "[[${monthSlug}/${category}/${groupDirName}]]"`,
+					'processed: false',
+					'verified: false',
+					'tags: []',
+					'---',
+					'',
+				].join('\n'));
+			}
+
+			this.recentFiles.push({
+				filename: `${groupBaseName} (group, ${groupFiles.length} file${groupFiles.length !== 1 ? 's' : ''})`,
+				filePath: groupDirPath,
+				notePath,
+				tags: [],
+				category,
+				droppedAt: minCtime,
+				verified: false,
+			});
+			trackedNotePaths.add(notePath);
+			trackedFilePaths.add(groupDirPath);
 			added++;
 		}
 
