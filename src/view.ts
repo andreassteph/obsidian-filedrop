@@ -1,6 +1,6 @@
 import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
-import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
+import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
 import { replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
 import { ReferenceModal } from './reference-modal';
@@ -287,17 +287,25 @@ export class FileDropView extends ItemView {
 		});
 
 		const summaryRow = entryEl.createDiv({ cls: 'filedrop-entry-summary-row' });
-		const summaryBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-summary', text: 'Add summary' });
-		summaryBtn.title = 'Generate summary with the selected LLM';
+		const hasSummary = this.entryHasSummary(entry);
+		const summaryLabel = hasSummary ? 'Change summary' : 'Add summary';
+		const summaryBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-summary', text: summaryLabel });
+		summaryBtn.title = hasSummary
+			? 'Revise the existing summary with the selected LLM'
+			: 'Generate summary with the selected LLM';
 		summaryBtn.disabled = inProgress;
 		summaryBtn.addEventListener('click', async () => {
+			if (this.entryHasSummary(entry)) {
+				await this.changeSummaryForEntry(entry, summaryBtn);
+				return;
+			}
 			summaryBtn.disabled = true;
 			summaryBtn.setText('Summarizing…');
 			try {
 				await this.summarizeEntry(entry);
 			} finally {
 				summaryBtn.disabled = false;
-				summaryBtn.setText('Add summary');
+				summaryBtn.setText(this.entryHasSummary(entry) ? 'Change summary' : 'Add summary');
 			}
 		});
 
@@ -472,6 +480,51 @@ export class FileDropView extends ItemView {
 		return base[reason];
 	}
 
+	private entryHasSummary(entry: DroppedFile): boolean {
+		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
+		if (!(file instanceof TFile)) return false;
+		const summary = this.app.metadataCache.getFileCache(file)?.frontmatter?.summary;
+		return typeof summary === 'string' && summary.trim().length > 0;
+	}
+
+	private async changeSummaryForEntry(entry: DroppedFile, summaryBtn: HTMLButtonElement): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		if (!gateway || !isGatewayEnabled(gateway)) {
+			new Notice('FileDrop: select an LLM model first.');
+			return;
+		}
+
+		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
+		if (!(file instanceof TFile)) {
+			new Notice('FileDrop: could not find the note to summarize.');
+			return;
+		}
+
+		const currentSummary = String(this.app.metadataCache.getFileCache(file)?.frontmatter?.summary ?? '');
+
+		new ChangeSummaryModal(this.app, currentSummary, async (instruction) => {
+			summaryBtn.disabled = true;
+			summaryBtn.setText('Revising…');
+			try {
+				const content = await this.app.vault.read(file);
+				const i = content.indexOf('\n---\n');
+				const body = i >= 0 ? content.slice(i + 5) : content;
+
+				const result = await reviseSummary(body, currentSummary, instruction, gateway, undefined, () => this.plugin.saveSettings());
+				if (!result.ok) {
+					new Notice(`FileDrop: could not change the summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
+					return;
+				}
+
+				await this.writeNoteSummary(entry.notePath, result.value);
+				new Notice('FileDrop: summary updated.');
+			} finally {
+				summaryBtn.disabled = false;
+				summaryBtn.setText(this.entryHasSummary(entry) ? 'Change summary' : 'Add summary');
+			}
+		}).open();
+	}
+
 	private async summarizeEntry(entry: DroppedFile): Promise<void> {
 		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
 		if (!gateway || !isGatewayEnabled(gateway)) {
@@ -613,6 +666,58 @@ export class FileDropView extends ItemView {
 		const content = await this.app.vault.read(file);
 		const updated = content.replace(/^verified:.*$/m, 'verified: true');
 		await this.app.vault.modify(file, updated);
+	}
+}
+
+class ChangeSummaryModal extends Modal {
+	constructor(
+		app: App,
+		private readonly currentSummary: string,
+		private readonly onSubmit: (instruction: string) => Promise<void>,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('h3', { text: 'Change summary' });
+		this.contentEl.createEl('p', {
+			cls: 'filedrop-change-summary-current',
+			text: this.currentSummary,
+		});
+		this.contentEl.createEl('p', {
+			text: 'Describe how the summary should be changed. The LLM revises it using the full document and the current summary as context.',
+		});
+
+		const input = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
+		input.placeholder = 'e.g. make it shorter, focus on the financial figures, mention the deadline…';
+		input.rows = 4;
+
+		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
+		const cancelBtn = buttons.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => this.close());
+		const submitBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Change summary' });
+		const submit = async () => {
+			const instruction = input.value.trim();
+			if (!instruction) {
+				new Notice('FileDrop: describe how the summary should change.');
+				return;
+			}
+			this.close();
+			await this.onSubmit(instruction);
+		};
+		submitBtn.addEventListener('click', submit);
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
+				e.preventDefault();
+				void submit();
+			}
+		});
+
+		window.setTimeout(() => input.focus(), 0);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
 	}
 }
 

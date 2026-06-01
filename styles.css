@@ -657,3 +657,18 @@
   gap: 8px;
   margin-top: 12px;
 }
+
+.filedrop-change-summary-current {
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+}
+
+.filedrop-change-summary-input {
+  width: 100%;
+  resize: vertical;
+  box-sizing: border-box;
+}
