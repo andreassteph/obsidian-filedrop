@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.3.1 — Improve LLM error messages with gateway context
+
+### Changes
+
+- Recover and surface the gateway URL in LLM failure notices for easier debugging
+
 ## 0.3.0 — Add file grouping mode and configurable binary file descriptions
 
 ### Changes
