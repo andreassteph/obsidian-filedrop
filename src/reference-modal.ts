@@ -11,6 +11,7 @@ export class ReferenceModal extends Modal {
 	private metadata: ActivityMetadata;
 	private summary: string;
 	private matchedNotes: MatchedNote[];
+	private ranked: boolean;
 
 	constructor(
 		app: App,
@@ -20,6 +21,7 @@ export class ReferenceModal extends Modal {
 		metadata: ActivityMetadata,
 		summary: string,
 		matchedNotes: MatchedNote[],
+		ranked: boolean,
 	) {
 		super(app);
 		this.plugin = plugin;
@@ -28,6 +30,7 @@ export class ReferenceModal extends Modal {
 		this.metadata = metadata;
 		this.summary = summary;
 		this.matchedNotes = matchedNotes;
+		this.ranked = ranked;
 	}
 
 	onOpen(): void {
@@ -49,11 +52,13 @@ export class ReferenceModal extends Modal {
 		const list = contentEl.createDiv({ cls: 'filedrop-ref-modal-list' });
 		const checkboxes: HTMLInputElement[] = [];
 
-		for (const match of this.matchedNotes) {
+		for (let i = 0; i < this.matchedNotes.length; i++) {
+			const match = this.matchedNotes[i];
 			const item = list.createDiv({ cls: 'filedrop-ref-modal-item' });
 			const cb = item.createEl('input');
 			cb.type = 'checkbox';
-			cb.checked = true;
+			// Ranked: pre-select only the top LLM pick. Fallback (unranked): nothing pre-selected.
+			cb.checked = this.ranked && i === 0;
 			checkboxes.push(cb);
 
 			const labelEl = item.createDiv({ cls: 'filedrop-ref-modal-label' });
