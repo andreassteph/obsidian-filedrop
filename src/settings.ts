@@ -63,6 +63,8 @@ export interface FileDropSettings {
 	referenceGroups: ReferenceConditionGroup[];
 	referenceTemplate: string;
 	referenceMaxMatches: number;
+	todoSection: string;
+	todoPrompt: string;
 	// Legacy fields — read on first load for migration only
 	llmProvider?: string;
 	llmGatewayUrl?: string;
@@ -132,6 +134,20 @@ export interface PluginData {
 	recentFiles: DroppedFile[];
 }
 
+// System prompt used to turn a plain-English follow-up request into a single
+// Obsidian Tasks line. The caller prepends today's date so relative phrases
+// ("in a month") resolve correctly.
+export const DEFAULT_TODO_PROMPT = [
+	'You convert a follow-up request about a note into ONE Obsidian Tasks line.',
+	'Output format: a markdown checklist item "- [ ] <description>" followed by optional signifiers.',
+	'Use these Obsidian Tasks emoji signifiers with YYYY-MM-DD dates:',
+	'  📅 due date · ⏳ scheduled date · 🛫 start date · 🔁 recurrence (e.g. "🔁 every month")',
+	'  priority: 🔺 highest, ⏫ high, 🔼 medium, 🔽 low, ⏬ lowest',
+	'Resolve relative dates from today. A "follow up in <period>" request is a SCHEDULED date (⏳) today + that period.',
+	'Keep the description short and actionable, referencing the note when helpful.',
+	'Return ONLY the single task line, with no surrounding text, quotes, or code fences.',
+].join('\n');
+
 export const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
 	categories: ['default', 'mails', 'teams'],
@@ -143,6 +159,8 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceGroups: [],
 	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
 	referenceMaxMatches: 5,
+	todoSection: '## Tasks',
+	todoPrompt: DEFAULT_TODO_PROMPT,
 };
 
 export interface PreferredTag {

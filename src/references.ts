@@ -266,6 +266,59 @@ export async function matchCandidatesWithLLM(
 	return { ok: true, value: matched };
 }
 
+export async function generateTodoTask(
+	intent: string,
+	context: { title: string; summary: string; date: string | null },
+	gateway: LlmGateway,
+	today: string,
+	promptRules: string,
+	persist?: () => Promise<void>,
+): Promise<LlmResult<string>> {
+	if (!isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+
+	const system = `Today's date is ${today}.\n${promptRules}`;
+	const contextLines = [
+		`Note title: ${context.title}`,
+		context.date ? `Document date: ${context.date}` : '',
+		context.summary ? `Note summary: ${context.summary.slice(0, 2000)}` : '',
+	].filter(Boolean).join('\n');
+	const user = `${contextLines}\n\nTodo request: ${intent}`;
+
+	// Route through callChat so this honors the model's detected capabilities
+	// (token-param name, system-role folding) and auto-corrects on a parameter
+	// error — the same path used by the other reference LLM helpers.
+	const result = await callChat(
+		gateway,
+		{
+			label: 'generateTodo',
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: user },
+			],
+			maxTokens: 300,
+			temperature: 0,
+			timeoutMs: REFERENCE_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+
+	return { ok: true, value: normalizeTaskLine(result.value) };
+}
+
+// Reduce an LLM reply (or raw user text) to a single Obsidian Tasks line.
+// Prefers the first existing checklist line; otherwise turns the cleaned text
+// into one by prefixing "- [ ] ".
+export function normalizeTaskLine(raw: string): string {
+	const cleaned = stripThinking(raw).replace(/^```(?:\w+)?\s*/i, '').replace(/\s*```$/i, '').trim();
+	const lines = cleaned.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
+	const task = lines.find((l) => /^[-*]\s*\[[ xX]\]/.test(l));
+	if (task) return task.replace(/^[*]/, '-');
+	const text = (lines[0] ?? cleaned).replace(/^[-*]\s+/, '').trim();
+	return text ? `- [ ] ${text}` : '';
+}
+
 export function renderReferenceBlock(
 	template: string,
 	vars: { date: string; type: string; summary: string; title: string; people: string; note_link: string },
@@ -364,5 +417,47 @@ export function insertReferenceIntoNote(content: string, referenceBlock: string,
 		...lines.slice(insertAt),
 	];
 
+	return content.slice(0, bodyStart) + newLines.join('\n');
+}
+
+// Append a single task line at the end of the named section, creating the
+// section if it doesn't exist. Unlike insertReferenceIntoNote this does not
+// reorder by date — tasks are kept in insertion order.
+export function insertTaskIntoNote(content: string, taskLine: string, sectionHeader: string): string {
+	const fmEnd = content.indexOf('\n---\n');
+	const bodyStart = fmEnd >= 0 ? fmEnd + 5 : 0;
+	const body = content.slice(bodyStart);
+
+	const sectionLevel = headingLevel(sectionHeader.trim());
+	const lines = body.split('\n');
+
+	let sectionIdx = -1;
+	for (let i = 0; i < lines.length; i++) {
+		if (lines[i].trim() === sectionHeader.trim()) {
+			sectionIdx = i;
+			break;
+		}
+	}
+
+	if (sectionIdx === -1) {
+		const separator = content.endsWith('\n') ? '\n' : '\n\n';
+		return content + separator + sectionHeader + '\n\n' + taskLine + '\n';
+	}
+
+	// Find the end of this section (next heading of same or higher level, or EOF)
+	let sectionEnd = lines.length;
+	for (let i = sectionIdx + 1; i < lines.length; i++) {
+		const lvl = headingLevel(lines[i]);
+		if (lvl > 0 && lvl <= sectionLevel) {
+			sectionEnd = i;
+			break;
+		}
+	}
+
+	// Append after the last non-empty line within the section.
+	let insertAt = sectionEnd;
+	while (insertAt > sectionIdx + 1 && lines[insertAt - 1].trim() === '') insertAt--;
+
+	const newLines = [...lines.slice(0, insertAt), taskLine, ...lines.slice(insertAt)];
 	return content.slice(0, bodyStart) + newLines.join('\n');
 }
