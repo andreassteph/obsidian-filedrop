@@ -133,7 +133,9 @@ def convert(path, env):
         if result and result.strip():
             return result
     except Exception as exc:
-        print(f"[filedrop] markitdown LLM step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        url = env.get("FILEDROP_LLM_URL", "(not set)")
+        model = env.get("FILEDROP_LLM_MODEL", "(not set)")
+        print(f"[filedrop] markitdown LLM step failed [{model} @ {url}]: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
             # The LLM-enhanced step failed for a non-PDF (e.g. a PPTX markitdown
             # could not fully process). Keep the plain markitdown conversion so
