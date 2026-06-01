@@ -266,7 +266,10 @@ export async function fetchModelsForGateway(gw: LlmGateway): Promise<string[]> {
 		return extractModelIds(res.json);
 	} catch (err) {
 		console.error('FileDrop: failed to fetch models from', modelsUrl, err);
-		new Notice('FileDrop: could not fetch models from the gateway.');
+		const detail = (err as any)?.status
+			? gatewayErrorDetail((err as any).status, (err as any).text ?? '')
+			: String(err);
+		new Notice(`FileDrop: could not fetch models — ${detail}.`);
 		return [];
 	}
 }
@@ -333,6 +336,26 @@ function parseTagReply(raw: string, maxTags: number): string[] {
 	return out;
 }
 
+// Extract a human-readable error message from a gateway HTTP error response body.
+function gatewayErrorDetail(status: number, body: string): string {
+	if (body) {
+		try {
+			const json = JSON.parse(body);
+			const msg =
+				json?.error?.message ??
+				(typeof json?.error === 'string' ? json.error : undefined) ??
+				json?.message ??
+				json?.detail;
+			if (typeof msg === 'string' && msg.trim()) return `HTTP ${status} — ${msg.trim()}`;
+		} catch {
+			// not JSON — fall through to raw text
+		}
+		const trimmed = body.trim().slice(0, 200);
+		if (trimmed) return `HTTP ${status} — ${trimmed}`;
+	}
+	return `HTTP ${status}`;
+}
+
 // Ask the configured gateway to suggest tags for converted content. Prefers the
 // user's preferred tags but may add new ones. Never throws — callers check result.ok.
 export async function suggestTags(
@@ -391,7 +414,7 @@ export async function suggestTags(
 		if (!res) return { ok: false, reason: 'timeout' };
 		if (res.status < 200 || res.status >= 300) {
 			console.error('FileDrop suggestTags: HTTP', res.status, res.text);
-			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
+			return { ok: false, reason: 'api-error', detail: gatewayErrorDetail(res.status, res.text) };
 		}
 		const reply = res.json?.choices?.[0]?.message?.content;
 		if (typeof reply !== 'string') {
@@ -465,7 +488,7 @@ export async function summarizeContent(
 		if (!res) return { ok: false, reason: 'timeout' };
 		if (res.status < 200 || res.status >= 300) {
 			console.error('FileDrop summarize: HTTP', res.status, res.text);
-			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
+			return { ok: false, reason: 'api-error', detail: gatewayErrorDetail(res.status, res.text) };
 		}
 		const reply = res.json?.choices?.[0]?.message?.content;
 		if (typeof reply !== 'string') {
