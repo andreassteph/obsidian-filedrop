@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.3.2 — Add per-model gateway compatibility checks and improve LLM error context
+
+### Changes
+
+- Add per-model gateway compatibility check and capability config in settings
+- Include gateway URL and model name in LLM conversion error messages
+- Change reference modal defaults: pre-select top LLM pick only, nothing pre-selected in fallback
+
 ## 0.3.1 — Improve LLM error messages with gateway context
 
 ### Changes
