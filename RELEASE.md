@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.4.0 — Add change summary dialog and follow-up todos for references
+
+### Changes
+
+- Add "Change summary" dialog for notes with existing summaries, allowing updates without re-running full conversion
+- Make "Change summary" a two-step preview/iterate workflow for reviewing and refining summaries
+- Add follow-up todo feature to references confirmation modal
+
 ## 0.3.3 — Make reference matching capability-aware and improve check diagnostics
 
 ### Changes
