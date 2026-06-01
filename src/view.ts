@@ -426,7 +426,7 @@ export class FileDropView extends ItemView {
 			}
 		}
 
-		new ReferenceModal(this.app, this.plugin, entry, noteFile, metadata, summary, matchedNotes, matchResult?.ok ?? false).open();
+		new ReferenceModal(this.app, this.plugin, entry, noteFile, metadata, summary, matchedNotes, matchResult?.ok ?? false, gateway).open();
 	}
 
 	private hideEntry(entry: DroppedFile): void {

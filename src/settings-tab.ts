@@ -248,6 +248,33 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl)
+			.setName('Todo section')
+			.setDesc('Heading in the target note under which a follow-up todo is filed (e.g. "## Tasks").')
+			.addText((text) =>
+				text
+					.setValue(this.plugin.settings.todoSection)
+					.onChange(async (value) => {
+						this.plugin.settings.todoSection = value.trim() || DEFAULT_SETTINGS.todoSection;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Todo prompt')
+			.setDesc('System prompt that turns a plain-English follow-up request into an Obsidian Tasks line. Today\'s date is prepended automatically.')
+			.addTextArea((text) => {
+				text
+					.setValue(this.plugin.settings.todoPrompt)
+					.onChange(async (value) => {
+						this.plugin.settings.todoPrompt = value || DEFAULT_SETTINGS.todoPrompt;
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.rows = 8;
+				text.inputEl.style.width = '100%';
+				text.inputEl.style.fontFamily = 'monospace';
+			});
+
 		this.plugin.settings.referenceGroups.forEach((group, idx) => {
 			this.renderReferenceGroup(containerEl, group, idx);
 		});

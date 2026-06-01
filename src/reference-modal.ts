@@ -1,7 +1,15 @@
 import { App, Modal, Notice, TFile } from 'obsidian';
 
-import { DroppedFile } from './settings';
-import { ActivityMetadata, MatchedNote, renderReferenceBlock, insertReferenceIntoNote } from './references';
+import { DroppedFile, LlmGateway, isGatewayEnabled } from './settings';
+import {
+	ActivityMetadata,
+	MatchedNote,
+	renderReferenceBlock,
+	insertReferenceIntoNote,
+	insertTaskIntoNote,
+	generateTodoTask,
+	normalizeTaskLine,
+} from './references';
 import type FileDropPlugin from '../main';
 
 export class ReferenceModal extends Modal {
@@ -12,6 +20,7 @@ export class ReferenceModal extends Modal {
 	private summary: string;
 	private matchedNotes: MatchedNote[];
 	private ranked: boolean;
+	private gateway: LlmGateway | null;
 
 	constructor(
 		app: App,
@@ -22,6 +31,7 @@ export class ReferenceModal extends Modal {
 		summary: string,
 		matchedNotes: MatchedNote[],
 		ranked: boolean,
+		gateway: LlmGateway | null,
 	) {
 		super(app);
 		this.plugin = plugin;
@@ -31,6 +41,7 @@ export class ReferenceModal extends Modal {
 		this.summary = summary;
 		this.matchedNotes = matchedNotes;
 		this.ranked = ranked;
+		this.gateway = gateway;
 	}
 
 	onOpen(): void {
@@ -70,6 +81,89 @@ export class ReferenceModal extends Modal {
 				labelEl.createDiv({ text: desc, cls: 'filedrop-ref-modal-desc' });
 			}
 		}
+
+		// --- Follow-up todo ---
+		const gatewayActive = !!this.gateway && isGatewayEnabled(this.gateway);
+
+		const todoLabel = contentEl.createEl('label', { cls: 'filedrop-ref-modal-todo-toggle' });
+		const todoCheckbox = todoLabel.createEl('input');
+		todoCheckbox.type = 'checkbox';
+		todoLabel.appendText(' Add a follow-up todo');
+
+		const todoBox = contentEl.createDiv({ cls: 'filedrop-ref-modal-todo' });
+		todoBox.style.display = 'none';
+
+		const todoInput = todoBox.createEl('textarea', { cls: 'filedrop-ref-modal-todo-input' });
+		todoInput.placeholder = gatewayActive
+			? 'e.g. follow up in a month'
+			: 'e.g. - [ ] follow up with the team';
+		todoInput.rows = 2;
+
+		// "Add to" target dropdown — only relevant when more than one note is selected.
+		const targetRow = todoBox.createDiv({ cls: 'filedrop-ref-modal-todo-target' });
+		targetRow.createSpan({ text: 'Add to: ' });
+		const todoTargetSelect = targetRow.createEl('select');
+
+		const refreshTargets = (): void => {
+			const selected = this.matchedNotes.filter((_, i) => checkboxes[i].checked);
+			const prev = todoTargetSelect.value;
+			todoTargetSelect.empty();
+			for (const m of selected) {
+				const opt = todoTargetSelect.createEl('option');
+				opt.value = m.candidate.file.path;
+				opt.text = `${m.candidate.name} (${m.group.name})`;
+			}
+			if (selected.some((m) => m.candidate.file.path === prev)) todoTargetSelect.value = prev;
+			// Only ask which note when more than one is selected and the todo is enabled.
+			targetRow.style.display = todoCheckbox.checked && selected.length > 1 ? '' : 'none';
+		};
+
+		if (gatewayActive) {
+			const genRow = todoBox.createDiv({ cls: 'filedrop-ref-modal-todo-gen' });
+			const genBtn = genRow.createEl('button', { text: 'Generate' });
+			genBtn.addEventListener('click', async () => {
+				const intent = todoInput.value.trim();
+				if (!intent) {
+					new Notice('FileDrop: type what the todo should be first.');
+					return;
+				}
+				genBtn.disabled = true;
+				genBtn.textContent = 'Generating…';
+				try {
+					const today = new Date().toISOString().slice(0, 10);
+					const result = await generateTodoTask(
+						intent,
+						{ title: this.noteFile.basename, summary: this.summary, date: this.metadata.date },
+						this.gateway!,
+						today,
+						this.plugin.settings.todoPrompt,
+						() => this.plugin.saveSettings(),
+					);
+					if (result.ok && result.value) {
+						todoInput.value = result.value;
+					} else {
+						new Notice('FileDrop: could not generate todo (see console).');
+					}
+				} finally {
+					genBtn.disabled = false;
+					genBtn.textContent = 'Generate';
+				}
+			});
+		}
+
+		todoCheckbox.addEventListener('change', () => {
+			todoBox.style.display = todoCheckbox.checked ? '' : 'none';
+			refreshTargets();
+		});
+		for (const cb of checkboxes) cb.addEventListener('change', refreshTargets);
+		refreshTargets();
+
+		const selectedTodoTarget = (): MatchedNote | null => {
+			const selected = this.matchedNotes.filter((_, i) => checkboxes[i].checked);
+			if (selected.length === 0) return null;
+			if (selected.length === 1) return selected[0];
+			return selected.find((m) => m.candidate.file.path === todoTargetSelect.value) ?? null;
+		};
 
 		const btnRow = contentEl.createDiv({ cls: 'filedrop-ref-modal-buttons' });
 
@@ -114,7 +208,28 @@ export class ReferenceModal extends Modal {
 				}
 			}
 
-			new Notice(`FileDrop: added reference to ${count} note${count !== 1 ? 's' : ''}.`);
+			// Optional follow-up todo, written into a single selected note.
+			let todoCount = 0;
+			const todoText = todoInput.value.trim();
+			if (todoCheckbox.checked && todoText) {
+				const target = selectedTodoTarget();
+				if (!target) {
+					new Notice('FileDrop: no note selected for the todo — skipped.');
+				} else {
+					const taskLine = normalizeTaskLine(todoText);
+					try {
+						const current = await this.app.vault.read(target.candidate.file);
+						const updated = insertTaskIntoNote(current, taskLine, this.plugin.settings.todoSection);
+						await this.app.vault.modify(target.candidate.file, updated);
+						todoCount = 1;
+					} catch (e) {
+						console.error('FileDrop: failed to write todo to', target.candidate.file.path, e);
+					}
+				}
+			}
+
+			const todoMsg = todoCount ? `; added ${todoCount} todo` : '';
+			new Notice(`FileDrop: added reference to ${count} note${count !== 1 ? 's' : ''}${todoMsg}.`);
 			this.close();
 		});
 	}
