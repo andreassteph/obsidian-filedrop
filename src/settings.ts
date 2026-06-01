@@ -761,3 +761,52 @@ export async function summarizeContent(
 	if (summary.length === 0) return { ok: false, reason: 'no-reply' };
 	return { ok: true, value: summary };
 }
+
+// Revise an existing summary according to a user instruction. The LLM gets the
+// full document as context plus the current summary and the change request.
+// Never throws — callers check result.ok for the specific failure reason.
+export async function reviseSummary(
+	content: string,
+	currentSummary: string,
+	instruction: string,
+	gateway: LlmGateway | null,
+	options?: { maxContentChars?: number },
+	persist?: () => Promise<void>
+): Promise<LlmResult<string>> {
+	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+	if (!content) return { ok: false, reason: 'empty-content', detail: 'note body is empty' };
+	if (isErrorBody(content)) return { ok: false, reason: 'empty-content', detail: 'note contains a conversion error' };
+
+	const maxChars = options?.maxContentChars ?? 20000;
+	const body = content.slice(0, maxChars);
+
+	const system =
+		'You revise the summary of a document. ' +
+		'You are given the full document, its current summary, and an instruction on how to change it. ' +
+		'Apply the instruction and return a concise summary in a few plain sentences. ' +
+		'No markdown, no preamble, no labels — return only the revised summary text.';
+	const user =
+		`Document content:\n${body}\n\n` +
+		`Current summary:\n${currentSummary}\n\n` +
+		`Instruction for how to change the summary:\n${instruction}`;
+
+	const result = await callChat(
+		gateway,
+		{
+			label: 'revise-summary',
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: user },
+			],
+			maxTokens: 2000,
+			temperature: 0,
+			timeoutMs: SUMMARY_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+	const summary = cleanSummaryReply(result.value);
+	if (summary.length === 0) return { ok: false, reason: 'no-reply' };
+	return { ok: true, value: summary };
+}
