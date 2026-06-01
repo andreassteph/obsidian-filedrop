@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.3.3 — Make reference matching capability-aware and improve check diagnostics
+
+### Changes
+
+- Reference matching now respects gateway capability config, skipping unsupported models
+- Improve diagnostics output for gateway compatibility checks
+
 ## 0.3.2 — Add per-model gateway compatibility checks and improve LLM error context
 
 ### Changes
