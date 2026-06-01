@@ -253,7 +253,8 @@ export async function runMarkitdown(
 							return;
 						}
 						new Notice('FileDrop: LLM conversion failed — see note body for details.');
-						resolve(conversionErrorBody('LLM conversion failed', subprocessErrorDetail(error, stderr)));
+						const gwContext = `Gateway: ${gateway.name}\nURL: ${gateway.baseUrl}\nModel: ${gateway.model}\n\n`;
+						resolve(conversionErrorBody('LLM conversion failed', gwContext + subprocessErrorDetail(error, stderr)));
 						return;
 					}
 					if (!stdout.trim()) {
@@ -263,10 +264,11 @@ export async function runMarkitdown(
 							return;
 						}
 						const diagLines = stderr.split('\n').filter(l => l.startsWith('[filedrop]')).join('\n');
+						const gwContext = `Gateway: ${gateway.name}\nURL: ${gateway.baseUrl}\nModel: ${gateway.model}\n\n`;
 						const detail = diagLines
 							? `markitdown exited but returned empty content.\n\nDiagnostics:\n${diagLines}`
 							: 'markitdown exited successfully but returned empty content.';
-						resolve(conversionErrorBody('Conversion produced no output', detail));
+						resolve(conversionErrorBody('Conversion produced no output', gwContext + detail));
 						return;
 					}
 					resolve(stdout.trim());
