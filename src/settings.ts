@@ -432,7 +432,7 @@ export function detectCapabilityFix(detail: string, caps: ModelCapabilities): Pa
 	return null;
 }
 
-interface ChatPayload {
+export interface ChatPayload {
 	label: string;
 	messages: ChatMessage[];
 	maxTokens: number;
@@ -440,11 +440,12 @@ interface ChatPayload {
 	timeoutMs: number;
 }
 
-// Low-level chat-completion call shared by suggestTags/summarizeContent. Builds
-// the request body from the model's known capabilities and, on a parameter
-// error (e.g. max_tokens unsupported), flips the offending capability, persists
-// it, and retries — so an unchecked model self-corrects on first use.
-async function callChat(
+// Low-level chat-completion call shared by suggestTags/summarizeContent and the
+// reference-matching calls in references.ts. Builds the request body from the
+// model's known capabilities and, on a parameter error (e.g. max_tokens
+// unsupported), flips the offending capability, persists it, and retries — so an
+// unchecked model self-corrects on first use.
+export async function callChat(
 	gw: LlmGateway,
 	payload: ChatPayload,
 	persist?: () => Promise<void>
@@ -562,6 +563,7 @@ export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
 		{ role: 'user', content: 'Reply with the single word: ok' },
 	];
 	let reached = false;
+	let lastDetail: string | undefined;
 	for (let attempt = 0; attempt < 4 && !reached; attempt++) {
 		let res: Awaited<ReturnType<typeof requestUrl>> | null;
 		try {
@@ -578,16 +580,22 @@ export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
 			reached = true;
 			break;
 		}
-		const detail = gatewayErrorDetail(res.status, res.text);
-		const fix = detectCapabilityFix(detail, caps);
+		lastDetail = gatewayErrorDetail(res.status, res.text);
+		const fix = detectCapabilityFix(lastDetail, caps);
 		if (!fix) {
-			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail });
+			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: lastDetail });
 			return { ok: false, steps };
 		}
 		Object.assign(caps, fix);
 	}
 	if (!reached) {
-		steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: 'no working parameter combination' });
+		steps.push({
+			label: 'Reachable via chat completion',
+			status: 'fail',
+			detail: lastDetail
+				? `no working parameter combination — last error: ${lastDetail}`
+				: 'no working parameter combination',
+		});
 		return { ok: false, steps };
 	}
 	steps.push({ label: 'Reachable via chat completion', status: 'ok' });

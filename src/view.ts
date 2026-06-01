@@ -380,7 +380,7 @@ export class FileDropView extends ItemView {
 			const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
 
 			if (gatewayActive && hasNullMetadata) {
-				const fillResult = await fillMetadataWithLLM(metadata, body, gateway!);
+				const fillResult = await fillMetadataWithLLM(metadata, body, gateway!, () => this.plugin.saveSettings());
 				if (fillResult.ok) metadata = fillResult.value;
 			}
 		}
@@ -403,7 +403,7 @@ export class FileDropView extends ItemView {
 		if (summary) noteFrontmatter['summary'] = summary;
 
 		const matchResult = gatewayActive
-			? await matchCandidatesWithLLM(body, noteFrontmatter, groupCandidates, gateway!, this.plugin.settings.referenceMaxMatches)
+			? await matchCandidatesWithLLM(body, noteFrontmatter, groupCandidates, gateway!, this.plugin.settings.referenceMaxMatches, () => this.plugin.saveSettings())
 			: null;
 
 		let matchedNotes: MatchedNote[] = [];
@@ -500,7 +500,7 @@ export class FileDropView extends ItemView {
 		let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
 		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
 		if (isGatewayEnabled(gateway) && hasNullMetadata) {
-			const fillResult = await fillMetadataWithLLM(metadata, body, gateway);
+			const fillResult = await fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings());
 			if (fillResult.ok) metadata = fillResult.value;
 		}
 

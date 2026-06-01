@@ -1,6 +1,6 @@
-import { App, TFile, requestUrl } from 'obsidian';
+import { App, TFile } from 'obsidian';
 
-import { LlmGateway, LlmResult, ReferenceConditionGroup, isGatewayEnabled, isGatewayUrlSecure, stripThinking } from './settings';
+import { LlmGateway, LlmResult, ReferenceConditionGroup, callChat, isGatewayEnabled, isGatewayUrlSecure, stripThinking } from './settings';
 
 export interface ActivityMetadata {
 	date: string | null;
@@ -128,6 +128,7 @@ export async function fillMetadataWithLLM(
 	metadata: ActivityMetadata,
 	content: string,
 	gateway: LlmGateway,
+	persist?: () => Promise<void>,
 ): Promise<LlmResult<ActivityMetadata>> {
 	if (!isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -144,51 +145,41 @@ export async function fillMetadataWithLLM(
 		'For date use YYYY-MM-DD. For people use an array of strings. Return ONLY valid JSON.';
 	const user = `Fields needed: ${needed.join('; ')}\n\nDocument:\n${content.slice(0, 6000)}`;
 
-	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-	const request = requestUrl({
-		url,
-		method: 'POST',
-		throw: false,
-		headers: {
-			Authorization: `Bearer ${gateway.apiKey}`,
-			'x-api-key': gateway.apiKey,
-			'Content-Type': 'application/json',
-		},
-		body: JSON.stringify({
-			model: gateway.model,
-			temperature: 0,
-			max_tokens: 300,
+	// Route through callChat so this honors the model's detected capabilities
+	// (token-param name, system-role folding) and auto-corrects on a parameter
+	// error — the same path that makes summarizeContent robust.
+	const result = await callChat(
+		gateway,
+		{
+			label: 'fillMetadata',
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
 			],
-		}),
-	});
+			maxTokens: 300,
+			temperature: 0,
+			timeoutMs: REFERENCE_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
 
-	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), REFERENCE_TIMEOUT_MS));
+	const cleaned = stripThinking(result.value).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
+	const objMatch = cleaned.match(/\{[\s\S]*\}/);
+	if (!objMatch) return { ok: false, reason: 'no-reply' };
+	let parsed: Record<string, unknown>;
 	try {
-		const res = await Promise.race([request, timeout]);
-		if (!res) return { ok: false, reason: 'timeout' };
-		if (res.status < 200 || res.status >= 300) {
-			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
-		}
-		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') return { ok: false, reason: 'no-reply' };
-
-		const cleaned = stripThinking(reply).replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '').trim();
-		const objMatch = cleaned.match(/\{[\s\S]*\}/);
-		if (!objMatch) return { ok: false, reason: 'no-reply' };
-		const parsed = JSON.parse(objMatch[0]);
-
-		const result: ActivityMetadata = { ...metadata };
-		if (!result.date && typeof parsed.date === 'string') result.date = parsed.date;
-		if (!result.type && typeof parsed.type === 'string') result.type = parsed.type;
-		if (!result.people && Array.isArray(parsed.people)) result.people = parsed.people.map(String);
-		return { ok: true, value: result };
+		parsed = JSON.parse(objMatch[0]);
 	} catch (e) {
-		console.error('FileDrop fillMetadataWithLLM error:', e);
-		return { ok: false, reason: 'api-error', detail: String(e) };
+		console.error('FileDrop fillMetadataWithLLM parse error:', e);
+		return { ok: false, reason: 'no-reply' };
 	}
+
+	const out: ActivityMetadata = { ...metadata };
+	if (!out.date && typeof parsed.date === 'string') out.date = parsed.date;
+	if (!out.type && typeof parsed.type === 'string') out.type = parsed.type;
+	if (!out.people && Array.isArray(parsed.people)) out.people = parsed.people.map(String);
+	return { ok: true, value: out };
 }
 
 export async function matchCandidatesWithLLM(
@@ -197,6 +188,7 @@ export async function matchCandidatesWithLLM(
 	groupCandidates: GroupCandidates[],
 	gateway: LlmGateway,
 	maxMatches: number,
+	persist?: () => Promise<void>,
 ): Promise<LlmResult<MatchedNote[]>> {
 	if (!isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -230,58 +222,48 @@ export async function matchCandidatesWithLLM(
 	const user = (fmLines ? `Document metadata:\n${fmLines}\n\n` : '') +
 		`Document body (excerpt):\n${noteContent.slice(0, 4000)}\n\nCandidate notes:\n${lines.join('\n')}`;
 
-	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-	const request = requestUrl({
-		url,
-		method: 'POST',
-		throw: false,
-		headers: {
-			Authorization: `Bearer ${gateway.apiKey}`,
-			'x-api-key': gateway.apiKey,
-			'Content-Type': 'application/json',
-		},
-		body: JSON.stringify({
-			model: gateway.model,
-			temperature: 0,
-			max_tokens: 2000,
+	// Route through callChat so this honors the model's detected capabilities
+	// (token-param name, system-role folding) and auto-corrects on a parameter
+	// error — the same path that makes summarizeContent robust.
+	const result = await callChat(
+		gateway,
+		{
+			label: 'matchCandidates',
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
 			],
-		}),
-	});
+			maxTokens: 2000,
+			temperature: 0,
+			timeoutMs: REFERENCE_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
 
-	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), REFERENCE_TIMEOUT_MS));
+	const cleaned = stripThinking(result.value).trim();
+	const arrMatch = cleaned.match(/\[[\s\S]*\]/);
+	if (!arrMatch) return { ok: true, value: [] };
+	let indices: unknown;
 	try {
-		const res = await Promise.race([request, timeout]);
-		if (!res) return { ok: false, reason: 'timeout' };
-		if (res.status < 200 || res.status >= 300) {
-			return { ok: false, reason: 'api-error', detail: `HTTP ${res.status}` };
-		}
-		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') return { ok: false, reason: 'no-reply' };
-
-		const cleaned = stripThinking(reply).trim();
-		const arrMatch = cleaned.match(/\[[\s\S]*\]/);
-		if (!arrMatch) return { ok: true, value: [] };
-		const indices: number[] = JSON.parse(arrMatch[0]);
-		if (!Array.isArray(indices)) return { ok: true, value: [] };
-
-		const seen = new Set<string>();
-		const matched: MatchedNote[] = [];
-		for (const idx of indices) {
-			if (typeof idx !== 'number' || idx < 0 || idx >= allCandidates.length) continue;
-			const { candidate, group } = allCandidates[idx];
-			if (seen.has(candidate.file.path)) continue;
-			seen.add(candidate.file.path);
-			matched.push({ candidate, group });
-			if (matched.length >= maxMatches) break;
-		}
-		return { ok: true, value: matched };
+		indices = JSON.parse(arrMatch[0]);
 	} catch (e) {
-		console.error('FileDrop matchCandidatesWithLLM error:', e);
-		return { ok: false, reason: 'api-error', detail: String(e) };
+		console.error('FileDrop matchCandidatesWithLLM parse error:', e);
+		return { ok: true, value: [] };
 	}
+	if (!Array.isArray(indices)) return { ok: true, value: [] };
+
+	const seen = new Set<string>();
+	const matched: MatchedNote[] = [];
+	for (const idx of indices) {
+		if (typeof idx !== 'number' || idx < 0 || idx >= allCandidates.length) continue;
+		const { candidate, group } = allCandidates[idx];
+		if (seen.has(candidate.file.path)) continue;
+		seen.add(candidate.file.path);
+		matched.push({ candidate, group });
+		if (matched.length >= maxMatches) break;
+	}
+	return { ok: true, value: matched };
 }
 
 export function renderReferenceBlock(
