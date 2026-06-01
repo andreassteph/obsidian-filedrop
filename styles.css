@@ -520,6 +520,14 @@
 
 .filedrop-check-ok { color: var(--color-green); }
 .filedrop-check-fail { color: var(--color-red); }
+.filedrop-check-warn { color: var(--color-yellow); }
+
+/* Per-model compatibility check: let step/summary details wrap instead of
+   truncating, since they carry full gateway error messages. */
+.filedrop-check-status .filedrop-check-detail {
+  white-space: normal;
+  overflow: visible;
+}
 
 .filedrop-check-label {
   font-weight: 500;

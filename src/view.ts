@@ -391,7 +391,7 @@ export class FileDropView extends ItemView {
 		// Generate summary if missing
 		let summary = existingSummary;
 		if (gatewayActive && !existingSummary) {
-			const summaryResult = await summarizeContent(body, gateway!);
+			const summaryResult = await summarizeContent(body, gateway!, undefined, () => this.plugin.saveSettings());
 			if (summaryResult.ok) {
 				await this.writeNoteSummary(entry.notePath, summaryResult.value);
 				summary = summaryResult.value;
@@ -490,7 +490,7 @@ export class FileDropView extends ItemView {
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
 		// Extract summary
-		const result = await summarizeContent(body, gateway);
+		const result = await summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings());
 		if (!result.ok) {
 			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;
@@ -526,7 +526,7 @@ export class FileDropView extends ItemView {
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
-		const result = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags));
+		const result = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags), undefined, () => this.plugin.saveSettings());
 		if (!result.ok) {
 			new Notice(`FileDrop: could not suggest tags — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;

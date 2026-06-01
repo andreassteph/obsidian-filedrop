@@ -3,6 +3,23 @@ import { Notice, requestUrl } from 'obsidian';
 export const VIEW_TYPE = 'filedrop-sidebar';
 export const MAX_RECENT_FILES = 50;
 
+// What a specific model on a gateway accepts. Detected by probeModel() (the
+// "Check" button) and also learned at runtime via callChat()'s auto-retry, then
+// honored by every LLM call so e.g. reasoning models that reject `max_tokens`
+// get `max_completion_tokens` (or no limit at all) without the user noticing.
+export interface ModelCapabilities {
+	tokenParam: 'max_tokens' | 'max_completion_tokens' | 'none'; // 'none' => omit the token-limit param entirely
+	systemRole: boolean;   // false => fold the system message into the user message
+	vision: boolean;       // image_url content accepted
+	checkedAt?: string;    // ISO timestamp of the last successful probe/auto-detect
+}
+
+export const DEFAULT_CAPABILITIES: ModelCapabilities = {
+	tokenParam: 'max_tokens',
+	systemRole: true,
+	vision: true,
+};
+
 export interface LlmGateway {
 	id: string;
 	name: string;
@@ -11,6 +28,14 @@ export interface LlmGateway {
 	apiKey: string;
 	model: string;
 	prompt: string;
+	// Per-model capability cache, keyed by model id. Optional so older configs
+	// load unchanged; a missing entry means "assume defaults".
+	capabilities?: Record<string, ModelCapabilities>;
+}
+
+// The capabilities for the gateway's currently selected model, or defaults.
+export function getCapabilities(gw: LlmGateway): ModelCapabilities {
+	return gw.capabilities?.[gw.model] ?? { ...DEFAULT_CAPABILITIES };
 }
 
 export interface ReferenceCondition {
@@ -356,13 +381,270 @@ function gatewayErrorDetail(status: number, body: string): string {
 	return `HTTP ${status}`;
 }
 
+export type ChatMessage = { role: string; content: unknown };
+
+// Move every `system` message into the first textual `user` message (as a
+// prefix) for models that reject the system role. Non-mutating.
+function foldSystemRole(messages: ChatMessage[]): ChatMessage[] {
+	const systemParts = messages
+		.filter((m) => m.role === 'system' && typeof m.content === 'string')
+		.map((m) => m.content as string);
+	if (systemParts.length === 0) return messages;
+	const prefix = systemParts.join('\n\n');
+	const rest = messages.filter((m) => m.role !== 'system');
+	const idx = rest.findIndex((m) => m.role === 'user' && typeof m.content === 'string');
+	if (idx === -1) return [{ role: 'user', content: prefix }, ...rest];
+	return rest.map((m, i) => (i === idx ? { role: m.role, content: `${prefix}\n\n${m.content as string}` } : m));
+}
+
+// Assemble the chat-completions JSON body honoring a model's capabilities:
+// pick the token-limit param name (or omit it), and fold the system role if
+// unsupported.
+export function buildChatBody(
+	caps: ModelCapabilities,
+	opts: { model: string; messages: ChatMessage[]; maxTokens: number; temperature?: number }
+): Record<string, unknown> {
+	const messages = caps.systemRole ? opts.messages : foldSystemRole(opts.messages);
+	const body: Record<string, unknown> = { model: opts.model, messages };
+	if (caps.tokenParam !== 'none') body[caps.tokenParam] = opts.maxTokens;
+	if (opts.temperature !== undefined) body.temperature = opts.temperature;
+	return body;
+}
+
+// Given a gateway error message and the capabilities currently in effect, return
+// the single capability change the error implies (or null if it's not a
+// parameter-compatibility problem we know how to fix). Capability-aware so the
+// token param can step max_tokens → max_completion_tokens → none.
+export function detectCapabilityFix(detail: string, caps: ModelCapabilities): Partial<ModelCapabilities> | null {
+	const d = detail.toLowerCase();
+	if (d.includes('max_tokens') || d.includes('max_completion_tokens')) {
+		if (d.includes('max_completion_tokens') && caps.tokenParam !== 'max_completion_tokens') {
+			return { tokenParam: 'max_completion_tokens' };
+		}
+		if (caps.tokenParam !== 'none') return { tokenParam: 'none' };
+	}
+	if (caps.systemRole && d.includes('system') && /unsupported|not supported|does not support|invalid|developer|role/.test(d)) {
+		return { systemRole: false };
+	}
+	if (caps.vision && /image|vision|multimodal|modalit/.test(d)) {
+		return { vision: false };
+	}
+	return null;
+}
+
+interface ChatPayload {
+	label: string;
+	messages: ChatMessage[];
+	maxTokens: number;
+	temperature?: number;
+	timeoutMs: number;
+}
+
+// Low-level chat-completion call shared by suggestTags/summarizeContent. Builds
+// the request body from the model's known capabilities and, on a parameter
+// error (e.g. max_tokens unsupported), flips the offending capability, persists
+// it, and retries — so an unchecked model self-corrects on first use.
+async function callChat(
+	gw: LlmGateway,
+	payload: ChatPayload,
+	persist?: () => Promise<void>
+): Promise<LlmResult<string>> {
+	const url = `${gw.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+	let caps = getCapabilities(gw);
+	let lastDetail: string | undefined;
+
+	for (let attempt = 0; attempt < 4; attempt++) {
+		let res: Awaited<ReturnType<typeof requestUrl>> | null;
+		try {
+			const request = requestUrl({
+				url,
+				method: 'POST',
+				throw: false,
+				headers: {
+					Authorization: `Bearer ${gw.apiKey}`,
+					'x-api-key': gw.apiKey,
+					'Content-Type': 'application/json',
+				},
+				body: JSON.stringify(
+					buildChatBody(caps, {
+						model: gw.model,
+						messages: payload.messages,
+						maxTokens: payload.maxTokens,
+						temperature: payload.temperature,
+					})
+				),
+			});
+			const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), payload.timeoutMs));
+			res = await Promise.race([request, timeout]);
+		} catch (e) {
+			console.error(`FileDrop ${payload.label} error:`, e);
+			return { ok: false, reason: 'api-error', detail: String(e) };
+		}
+		if (!res) return { ok: false, reason: 'timeout' };
+		if (res.status >= 200 && res.status < 300) {
+			const reply = res.json?.choices?.[0]?.message?.content;
+			if (typeof reply !== 'string') {
+				console.error(`FileDrop ${payload.label}: unexpected response shape`, res.json);
+				return { ok: false, reason: 'no-reply' };
+			}
+			return { ok: true, value: reply };
+		}
+		lastDetail = gatewayErrorDetail(res.status, res.text);
+		const fix = detectCapabilityFix(lastDetail, caps);
+		if (!fix) {
+			console.error(`FileDrop ${payload.label}: HTTP`, res.status, res.text);
+			return { ok: false, reason: 'api-error', detail: lastDetail };
+		}
+		// Learn the corrected capability and persist it so the next call starts right.
+		caps = { ...caps, ...fix, checkedAt: new Date().toISOString() };
+		gw.capabilities = { ...(gw.capabilities ?? {}), [gw.model]: caps };
+		await persist?.();
+	}
+	return { ok: false, reason: 'api-error', detail: lastDetail ?? 'exceeded capability retries' };
+}
+
+export interface ProbeStep {
+	label: string;
+	status: 'ok' | 'fail' | 'warn';
+	detail?: string;
+}
+
+export interface ProbeResult {
+	ok: boolean;
+	steps: ProbeStep[];
+	capabilities?: ModelCapabilities;
+}
+
+const PROBE_TIMEOUT_MS = 30_000;
+// 1×1 transparent PNG, used to test image_url (vision) support.
+const PROBE_PNG_B64 =
+	'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
+
+// Probe a gateway+model: confirm it answers a chat completion and detect which
+// request parameters it supports. Adaptive — flips capabilities and retries the
+// same way callChat does, but reports each step for the settings UI. Never
+// throws. On success, `capabilities` holds the config all LLM calls should use.
+export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
+	if (!gw.model) {
+		return { ok: false, steps: [{ label: 'Model selected', status: 'fail', detail: 'choose a model first' }] };
+	}
+	if (!isGatewayEnabled(gw)) {
+		return { ok: false, steps: [{ label: 'Gateway configured', status: 'fail', detail: 'set the API key and model first' }] };
+	}
+	const issue = gatewayUrlIssue(gw.baseUrl);
+	if (issue) {
+		return { ok: false, steps: [{ label: 'Gateway URL', status: 'fail', detail: issue }] };
+	}
+
+	const url = `${gw.baseUrl.replace(/\/+$/, '')}/chat/completions`;
+	const send = (body: Record<string, unknown>) => {
+		const request = requestUrl({
+			url,
+			method: 'POST',
+			throw: false,
+			headers: {
+				Authorization: `Bearer ${gw.apiKey}`,
+				'x-api-key': gw.apiKey,
+				'Content-Type': 'application/json',
+			},
+			body: JSON.stringify(body),
+		});
+		const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), PROBE_TIMEOUT_MS));
+		return Promise.race([request, timeout]);
+	};
+
+	const steps: ProbeStep[] = [];
+	const caps: ModelCapabilities = { ...DEFAULT_CAPABILITIES };
+
+	// Stage 1 — reachability, token-limit param, and system-role support.
+	const textMessages: ChatMessage[] = [
+		{ role: 'system', content: 'You are a connectivity test.' },
+		{ role: 'user', content: 'Reply with the single word: ok' },
+	];
+	let reached = false;
+	for (let attempt = 0; attempt < 4 && !reached; attempt++) {
+		let res: Awaited<ReturnType<typeof requestUrl>> | null;
+		try {
+			res = await send(buildChatBody(caps, { model: gw.model, messages: textMessages, maxTokens: 16 }));
+		} catch (e) {
+			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: String(e) });
+			return { ok: false, steps };
+		}
+		if (!res) {
+			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: 'timed out' });
+			return { ok: false, steps };
+		}
+		if (res.status >= 200 && res.status < 300) {
+			reached = true;
+			break;
+		}
+		const detail = gatewayErrorDetail(res.status, res.text);
+		const fix = detectCapabilityFix(detail, caps);
+		if (!fix) {
+			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail });
+			return { ok: false, steps };
+		}
+		Object.assign(caps, fix);
+	}
+	if (!reached) {
+		steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: 'no working parameter combination' });
+		return { ok: false, steps };
+	}
+	steps.push({ label: 'Reachable via chat completion', status: 'ok' });
+	steps.push(
+		caps.tokenParam === 'none'
+			? { label: 'Token limit parameter', status: 'warn', detail: 'neither max_tokens nor max_completion_tokens accepted — calling without a limit' }
+			: { label: 'Token limit parameter', status: 'ok', detail: `using ${caps.tokenParam}` }
+	);
+	steps.push(
+		caps.systemRole
+			? { label: 'System role', status: 'ok', detail: 'supported' }
+			: { label: 'System role', status: 'warn', detail: 'not supported — folding into the user message' }
+	);
+
+	// Stage 2 — vision / image input.
+	const visionMessages: ChatMessage[] = [
+		{ role: 'system', content: 'You are a connectivity test.' },
+		{
+			role: 'user',
+			content: [
+				{ type: 'text', text: 'Reply with the single word: ok' },
+				{ type: 'image_url', image_url: { url: `data:image/png;base64,${PROBE_PNG_B64}` } },
+			],
+		},
+	];
+	try {
+		const res = await send(buildChatBody(caps, { model: gw.model, messages: visionMessages, maxTokens: 16 }));
+		if (!res) {
+			steps.push({ label: 'Image input (vision)', status: 'warn', detail: 'timed out — left as supported' });
+		} else if (res.status >= 200 && res.status < 300) {
+			caps.vision = true;
+			steps.push({ label: 'Image input (vision)', status: 'ok', detail: 'supported' });
+		} else {
+			const detail = gatewayErrorDetail(res.status, res.text);
+			if (/image|vision|multimodal|modalit/i.test(detail)) {
+				caps.vision = false;
+				steps.push({ label: 'Image input (vision)', status: 'warn', detail: 'not supported — scanned-PDF/image OCR will be skipped' });
+			} else {
+				steps.push({ label: 'Image input (vision)', status: 'warn', detail: `inconclusive — ${detail}` });
+			}
+		}
+	} catch (e) {
+		steps.push({ label: 'Image input (vision)', status: 'warn', detail: `inconclusive — ${String(e)}` });
+	}
+
+	caps.checkedAt = new Date().toISOString();
+	return { ok: true, steps, capabilities: caps };
+}
+
 // Ask the configured gateway to suggest tags for converted content. Prefers the
 // user's preferred tags but may add new ones. Never throws — callers check result.ok.
 export async function suggestTags(
 	content: string,
 	gateway: LlmGateway | null,
 	preferred: PreferredTag[],
-	options?: { maxTags?: number; maxContentChars?: number }
+	options?: { maxTags?: number; maxContentChars?: number },
+	persist?: () => Promise<void>
 ): Promise<LlmResult<string[]>> {
 	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -385,48 +667,22 @@ export async function suggestTags(
 		'Return ONLY the JSON array, with no other text.';
 	const user = `Preferred tags:\n${preferredList}\n\nDocument content:\n${body}`;
 
-	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-	const request = requestUrl({
-		url,
-		method: 'POST',
-		throw: false,
-		headers: {
-			Authorization: `Bearer ${gateway.apiKey}`,
-			'x-api-key': gateway.apiKey,
-			'Content-Type': 'application/json',
-		},
-		body: JSON.stringify({
-			model: gateway.model,
-			temperature: 0,
-			max_tokens: 150,
+	const result = await callChat(
+		gateway,
+		{
+			label: 'suggestTags',
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
 			],
-		}),
-	});
-
-	// requestUrl has no timeout option; race it so a stalled gateway can't block the drop.
-	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), TAG_SUGGEST_TIMEOUT_MS));
-
-	try {
-		const res = await Promise.race([request, timeout]);
-		if (!res) return { ok: false, reason: 'timeout' };
-		if (res.status < 200 || res.status >= 300) {
-			console.error('FileDrop suggestTags: HTTP', res.status, res.text);
-			return { ok: false, reason: 'api-error', detail: gatewayErrorDetail(res.status, res.text) };
-		}
-		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') {
-			console.error('FileDrop suggestTags: unexpected response shape', res.json);
-			return { ok: false, reason: 'no-reply' };
-		}
-		const tags = parseTagReply(reply, maxTags);
-		return { ok: true, value: tags };
-	} catch (e) {
-		console.error('FileDrop suggestTags error:', e);
-		return { ok: false, reason: 'api-error', detail: String(e) };
-	}
+			maxTokens: 150,
+			temperature: 0,
+			timeoutMs: TAG_SUGGEST_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+	return { ok: true, value: parseTagReply(result.value, maxTags) };
 }
 
 const SUMMARY_TIMEOUT_MS = 180_000; // 3 minutes — reasoning models can be slow
@@ -443,7 +699,8 @@ function cleanSummaryReply(raw: string): string {
 export async function summarizeContent(
 	content: string,
 	gateway: LlmGateway | null,
-	options?: { maxContentChars?: number }
+	options?: { maxContentChars?: number },
+	persist?: () => Promise<void>
 ): Promise<LlmResult<string>> {
 	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -459,47 +716,22 @@ export async function summarizeContent(
 		'No markdown, no preamble, no labels — return only the summary text.';
 	const user = `Document content:\n${body}`;
 
-	const url = `${gateway.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-	const request = requestUrl({
-		url,
-		method: 'POST',
-		throw: false,
-		headers: {
-			Authorization: `Bearer ${gateway.apiKey}`,
-			'x-api-key': gateway.apiKey,
-			'Content-Type': 'application/json',
-		},
-		body: JSON.stringify({
-			model: gateway.model,
-			temperature: 0,
-			max_tokens: 2000,
+	const result = await callChat(
+		gateway,
+		{
+			label: 'summarize',
 			messages: [
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
 			],
-		}),
-	});
-
-	// requestUrl has no timeout option; race it so a stalled gateway can't hang the UI.
-	const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), SUMMARY_TIMEOUT_MS));
-
-	try {
-		const res = await Promise.race([request, timeout]);
-		if (!res) return { ok: false, reason: 'timeout' };
-		if (res.status < 200 || res.status >= 300) {
-			console.error('FileDrop summarize: HTTP', res.status, res.text);
-			return { ok: false, reason: 'api-error', detail: gatewayErrorDetail(res.status, res.text) };
-		}
-		const reply = res.json?.choices?.[0]?.message?.content;
-		if (typeof reply !== 'string') {
-			console.error('FileDrop summarize: unexpected response shape', res.json);
-			return { ok: false, reason: 'no-reply' };
-		}
-		const summary = cleanSummaryReply(reply);
-		if (summary.length === 0) return { ok: false, reason: 'no-reply' };
-		return { ok: true, value: summary };
-	} catch (e) {
-		console.error('FileDrop summarize error:', e);
-		return { ok: false, reason: 'api-error', detail: String(e) };
-	}
+			maxTokens: 2000,
+			temperature: 0,
+			timeoutMs: SUMMARY_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+	const summary = cleanSummaryReply(result.value);
+	if (summary.length === 0) return { ok: false, reason: 'no-reply' };
+	return { ok: true, value: summary };
 }

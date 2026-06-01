@@ -102,6 +102,25 @@ def _make_client(env, **kwargs):
     )
 
 
+def _token_kwargs(env, limit):
+    """Build the token-limit kwarg for chat.completions.create, honoring the
+    capability detected on the TS side (FILEDROP_LLM_TOKEN_PARAM). 'none' omits
+    the limit entirely so models that reject both max_tokens and
+    max_completion_tokens still work."""
+    param = (env.get("FILEDROP_LLM_TOKEN_PARAM") or "max_tokens").strip()
+    if param == "none":
+        return {}
+    if param not in ("max_tokens", "max_completion_tokens"):
+        param = "max_tokens"
+    return {param: limit}
+
+
+def _vision_enabled(env):
+    """Whether the configured model accepts image input. Defaults to True when
+    unset; the TS settings 'Check' sets FILEDROP_LLM_VISION=0 for text-only models."""
+    return (env.get("FILEDROP_LLM_VISION") or "1").strip().lower() not in ("0", "false", "no", "off")
+
+
 def build_converter(env):
     client = _make_client(env)
     _install_thinking_filter(client)
@@ -175,6 +194,10 @@ def _convert_pdf_pages_with_llm(path, env):
     """
     import base64
 
+    if not _vision_enabled(env):
+        return ("> [!warning] Scanned-PDF OCR skipped — the configured model has no "
+                "vision (image input) support.")
+
     try:
         import fitz  # pymupdf  # type: ignore
     except ImportError:
@@ -206,7 +229,6 @@ def _convert_pdf_pages_with_llm(path, env):
         try:
             resp = client.chat.completions.create(
                 model=env["FILEDROP_LLM_MODEL"],
-                max_tokens=4096,
                 messages=[{
                     "role": "user",
                     "content": [
@@ -214,6 +236,7 @@ def _convert_pdf_pages_with_llm(path, env):
                         {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
                     ],
                 }],
+                **_token_kwargs(env, 4096),
             )
             text = (resp.choices[0].message.content or "").strip()
             text = strip_thinking(text)
@@ -240,8 +263,8 @@ def describe(path, env):
     prompt = (env.get("FILEDROP_DESCRIBE_PROMPT") or DEFAULT_DESCRIBE_PROMPT).format(filename=filename)
     response = client.chat.completions.create(
         model=env["FILEDROP_LLM_MODEL"],
-        max_tokens=2048,
         messages=[{"role": "user", "content": prompt}],
+        **_token_kwargs(env, 2048),
     )
     return response.choices[0].message.content or ""
 
