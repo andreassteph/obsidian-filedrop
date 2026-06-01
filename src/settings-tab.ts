@@ -4,10 +4,13 @@ import {
 	DEFAULT_SETTINGS,
 	LlmGateway,
 	LLM_PROVIDERS,
+	ModelCapabilities,
 	ReferenceConditionGroup,
 	fetchModelsForGateway,
 	gatewayUrlIssue,
+	getCapabilities,
 	isGatewayEnabled,
+	probeModel,
 } from './settings';
 import { checkMarkitdownCli, checkPythonEnv, installPythonRequirements, PYTHON_REQUIREMENTS } from './convert';
 import type FileDropPlugin from '../main';
@@ -381,6 +384,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 					this.plugin.settings.llmGateways[idx].model = value;
 					await this.plugin.saveSettings();
 					this.plugin.getActiveView()?.refreshModelSelector();
+					this.display(); // capabilities are per-model — refresh the check summary
 				});
 			})
 			.addExtraButton((btn) =>
@@ -409,6 +413,39 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Model compatibility check — probes the gateway+model and stores which
+		// request parameters it supports (e.g. max_tokens vs max_completion_tokens).
+		const checkSetting = new Setting(wrapperEl)
+			.setName('Check model compatibility')
+			.setDesc('Verify the model is reachable and detect which request parameters it supports.');
+
+		const checkStatusEl = checkSetting.controlEl.createDiv({ cls: 'filedrop-check-status' });
+		const saved = gw.capabilities?.[gw.model];
+		if (saved) {
+			checkStatusEl.createDiv({ cls: 'filedrop-check-detail', text: this.capabilitySummary(saved) });
+		}
+
+		checkSetting.addButton((btn) =>
+			btn.setButtonText('Check').onClick(async () => {
+				checkStatusEl.empty();
+				checkStatusEl.setText('Checking…');
+				const result = await probeModel(gw);
+				checkStatusEl.empty();
+				for (const { label, status, detail } of result.steps) {
+					const icon = status === 'ok' ? '✓' : status === 'warn' ? '!' : '✗';
+					const row = checkStatusEl.createDiv({ cls: 'filedrop-check-row' });
+					row.createSpan({ cls: `filedrop-check-icon filedrop-check-${status === 'ok' ? 'ok' : status === 'warn' ? 'warn' : 'fail'}`, text: icon });
+					row.createSpan({ cls: 'filedrop-check-label', text: label });
+					if (detail) row.createSpan({ cls: 'filedrop-check-detail', text: detail });
+				}
+				if (result.ok && result.capabilities) {
+					gw.capabilities = { ...(gw.capabilities ?? {}), [gw.model]: result.capabilities };
+					await this.plugin.saveSettings();
+					checkStatusEl.createDiv({ cls: 'filedrop-check-detail', text: this.capabilitySummary(result.capabilities) });
+				}
+			})
+		);
+
 		// Prompt
 		new Setting(wrapperEl)
 			.setName('Image description prompt')
@@ -422,6 +459,18 @@ export class FileDropSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+	}
+
+	private capabilitySummary(caps: ModelCapabilities): string {
+		const tokenPart =
+			caps.tokenParam === 'none' ? 'no token limit' : `using ${caps.tokenParam}`;
+		const parts = [
+			tokenPart,
+			caps.systemRole ? 'system role' : 'system role folded',
+			`vision: ${caps.vision ? 'yes' : 'no'}`,
+		];
+		const when = caps.checkedAt ? ` (checked ${new Date(caps.checkedAt).toLocaleString()})` : '';
+		return `Detected: ${parts.join(' · ')}${when}`;
 	}
 
 	private renderReferenceGroup(containerEl: HTMLElement, group: ReferenceConditionGroup, idx: number): void {

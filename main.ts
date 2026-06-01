@@ -229,7 +229,7 @@ export default class FileDropPlugin extends Plugin {
 			this.getActiveView()?.renderFileList();
 
 			const combinedBody = bodyParts.join('\n\n---\n\n');
-			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
 			const frontmatterLines = [
@@ -391,7 +391,7 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
-			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
 			const frontmatterLines = [
@@ -465,7 +465,7 @@ export default class FileDropPlugin extends Plugin {
 			const closingIdx = content.indexOf('\n---\n');
 			if (closingIdx < 0) return;
 
-			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags));
+			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 			const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
 

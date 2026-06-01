@@ -193,6 +193,86 @@ def test_convert_without_llm_swallows_errors():
         assert filedrop_convert._convert_without_llm("/tmp/deck.pptx") == ""
 
 
+def _recording_client():
+    calls = []
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        return _fake_response("ok")
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=create))
+    )
+    return client, calls
+
+
+@pytest.mark.parametrize(
+    "param, expected",
+    [
+        (None, {"max_tokens": 100}),
+        ("max_tokens", {"max_tokens": 100}),
+        ("max_completion_tokens", {"max_completion_tokens": 100}),
+        ("none", {}),
+        ("bogus", {"max_tokens": 100}),  # unknown value falls back to max_tokens
+    ],
+)
+def test_token_kwargs(param, expected):
+    env = dict(BASE_ENV)
+    if param is not None:
+        env["FILEDROP_LLM_TOKEN_PARAM"] = param
+    assert filedrop_convert._token_kwargs(env, 100) == expected
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, True), ("1", True), ("true", True), ("0", False), ("false", False), ("off", False)],
+)
+def test_vision_enabled(value, expected):
+    env = dict(BASE_ENV)
+    if value is not None:
+        env["FILEDROP_LLM_VISION"] = value
+    assert filedrop_convert._vision_enabled(env) is expected
+
+
+def test_describe_uses_default_token_param():
+    client, calls = _recording_client()
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"):
+        filedrop_convert.describe("/tmp/foo.bin", dict(BASE_ENV))
+    assert calls[0].get("max_tokens") == 2048
+    assert "max_completion_tokens" not in calls[0]
+
+
+def test_describe_uses_max_completion_tokens_when_configured():
+    client, calls = _recording_client()
+    env = dict(BASE_ENV, FILEDROP_LLM_TOKEN_PARAM="max_completion_tokens")
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"):
+        filedrop_convert.describe("/tmp/foo.bin", env)
+    assert calls[0].get("max_completion_tokens") == 2048
+    assert "max_tokens" not in calls[0]
+
+
+def test_describe_omits_token_limit_when_none():
+    client, calls = _recording_client()
+    env = dict(BASE_ENV, FILEDROP_LLM_TOKEN_PARAM="none")
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"):
+        filedrop_convert.describe("/tmp/foo.bin", env)
+    assert "max_tokens" not in calls[0]
+    assert "max_completion_tokens" not in calls[0]
+
+
+def test_convert_pdf_pages_skipped_when_vision_disabled():
+    """No-vision model → emit a warning and never touch the LLM client."""
+    env = dict(BASE_ENV, FILEDROP_LLM_VISION="0")
+    with patch.object(filedrop_convert, "_make_client") as make_client:
+        result = filedrop_convert._convert_pdf_pages_with_llm("/tmp/scan.pdf", env)
+    make_client.assert_not_called()
+    assert result.startswith("> [!warning]")
+    assert "vision" in result
+
+
 def test_install_thinking_filter_leaves_clean_content():
     client = types.SimpleNamespace(
         chat=types.SimpleNamespace(

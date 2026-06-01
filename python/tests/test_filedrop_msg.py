@@ -140,3 +140,40 @@ def test_convert_file_pptx_returns_error_callout_when_both_steps_fail():
 
 def test_build_llm_markitdown_none_without_gateway():
     assert filedrop_msg._build_llm_markitdown({}) is None
+
+
+@pytest.mark.parametrize(
+    "param, expected",
+    [
+        (None, {"max_tokens": 50}),
+        ("max_completion_tokens", {"max_completion_tokens": 50}),
+        ("none", {}),
+        ("bogus", {"max_tokens": 50}),
+    ],
+)
+def test_token_kwargs(param, expected):
+    env = dict(BASE_ENV)
+    if param is not None:
+        env["FILEDROP_LLM_TOKEN_PARAM"] = param
+    assert filedrop_msg._token_kwargs(env, 50) == expected
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, True), ("1", True), ("0", False), ("false", False)],
+)
+def test_vision_enabled(value, expected):
+    env = dict(BASE_ENV)
+    if value is not None:
+        env["FILEDROP_LLM_VISION"] = value
+    assert filedrop_msg._vision_enabled(env) is expected
+
+
+def test_convert_pdf_pages_skipped_when_vision_disabled():
+    """No-vision model → emit a warning and never construct the LLM client."""
+    env = dict(BASE_ENV, FILEDROP_LLM_VISION="0")
+    with patch.object(filedrop_msg, "_make_client") as make_client:
+        result = filedrop_msg._convert_pdf_pages_with_llm("/tmp/scan.pdf", env)
+    make_client.assert_not_called()
+    assert result.startswith("> [!warning]")
+    assert "vision" in result
