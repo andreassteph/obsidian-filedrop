@@ -234,6 +234,17 @@ def test_vision_enabled(value, expected):
     assert filedrop_convert._vision_enabled(env) is expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, {"temperature": 0}), ("1", {"temperature": 0}), ("0", {}), ("false", {}), ("off", {})],
+)
+def test_temperature_kwargs(value, expected):
+    env = dict(BASE_ENV)
+    if value is not None:
+        env["FILEDROP_LLM_TEMPERATURE"] = value
+    assert filedrop_convert._temperature_kwargs(env) == expected
+
+
 def test_describe_uses_default_token_param():
     client, calls = _recording_client()
     with patch.object(filedrop_convert, "_make_client", return_value=client), \
@@ -241,6 +252,23 @@ def test_describe_uses_default_token_param():
         filedrop_convert.describe("/tmp/foo.bin", dict(BASE_ENV))
     assert calls[0].get("max_tokens") == 2048
     assert "max_completion_tokens" not in calls[0]
+
+
+def test_describe_sends_temperature_by_default():
+    client, calls = _recording_client()
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"):
+        filedrop_convert.describe("/tmp/foo.bin", dict(BASE_ENV))
+    assert calls[0].get("temperature") == 0
+
+
+def test_describe_omits_temperature_when_disabled():
+    client, calls = _recording_client()
+    env = dict(BASE_ENV, FILEDROP_LLM_TEMPERATURE="0")
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"):
+        filedrop_convert.describe("/tmp/foo.bin", env)
+    assert "temperature" not in calls[0]
 
 
 def test_describe_uses_max_completion_tokens_when_configured():

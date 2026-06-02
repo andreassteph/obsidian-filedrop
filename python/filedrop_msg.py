@@ -137,6 +137,13 @@ def _vision_enabled(env):
     return (env.get("FILEDROP_LLM_VISION") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def _temperature_kwargs(env):
+    """Return {"temperature": 0} when the model supports it, or {} to omit it.
+    FILEDROP_LLM_TEMPERATURE=0 means not supported (e.g. reasoning models)."""
+    supported = (env.get("FILEDROP_LLM_TEMPERATURE") or "1").strip().lower() not in ("0", "false", "no", "off")
+    return {"temperature": 0} if supported else {}
+
+
 def _build_llm_markitdown(env):
     """MarkItDown wired to the LLM gateway, or None when no gateway is set."""
     if not _llm_configured(env):
@@ -212,6 +219,7 @@ def _convert_pdf_pages_with_llm(path, env):
                     ],
                 }],
                 **_token_kwargs(env, 2048),
+                **_temperature_kwargs(env),
             )
             text = (resp.choices[0].message.content or "").strip()
             text = _strip_thinking(text)

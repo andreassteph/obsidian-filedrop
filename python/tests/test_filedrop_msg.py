@@ -169,6 +169,17 @@ def test_vision_enabled(value, expected):
     assert filedrop_msg._vision_enabled(env) is expected
 
 
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, {"temperature": 0}), ("1", {"temperature": 0}), ("0", {}), ("false", {})],
+)
+def test_temperature_kwargs(value, expected):
+    env = dict(BASE_ENV)
+    if value is not None:
+        env["FILEDROP_LLM_TEMPERATURE"] = value
+    assert filedrop_msg._temperature_kwargs(env) == expected
+
+
 def test_convert_pdf_pages_skipped_when_vision_disabled():
     """No-vision model → emit a warning and never construct the LLM client."""
     env = dict(BASE_ENV, FILEDROP_LLM_VISION="0")
