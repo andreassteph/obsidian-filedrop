@@ -29,6 +29,13 @@ export default class FileDropPlugin extends Plugin {
 	settings: FileDropSettings;
 	recentFiles: DroppedFile[];
 
+	// Cancellation tokens for in-flight conversions (keyed by notePath)
+	private cancelledConversions = new Set<string>();
+
+	cancelConversion(notePath: string): void {
+		this.cancelledConversions.add(notePath);
+	}
+
 	// Group mode state
 	groupModeActive = false;
 	private readonly GROUP_IDLE_MS = 20_000;
@@ -337,6 +344,8 @@ export default class FileDropPlugin extends Plugin {
 		try {
 			await vault.adapter.writeBinary(rawFilePath, buffer);
 
+			if (this.cancelledConversions.delete(notePath)) return;
+
 			// File stored — switch to markitdown phase before running it
 			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
@@ -388,11 +397,15 @@ export default class FileDropPlugin extends Plugin {
 				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
 			}
 
+			if (this.cancelledConversions.delete(notePath)) return;
+
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
 			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
+
+			if (this.cancelledConversions.delete(notePath)) return;
 
 			const frontmatterLines = [
 				'---',

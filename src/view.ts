@@ -323,7 +323,7 @@ export class FileDropView extends ItemView {
 			this.app.workspace.openLinkText(entry.notePath, '', false);
 		});
 
-		const status = entry.status ?? 'converted';
+		const status = entry.status ?? 'unknown';
 		headerRow.createEl('span', {
 			cls: `filedrop-status filedrop-status--${status}`,
 			text: STATUS_LABELS[status] ?? status,
@@ -354,7 +354,7 @@ export class FileDropView extends ItemView {
 		});
 
 		const hideBtn = headerRow.createEl('button', { cls: 'filedrop-entry-hide', text: '×' });
-		hideBtn.title = 'Hide until next update';
+		hideBtn.title = 'Dismiss (cancels if converting)';
 		hideBtn.addEventListener('click', () => this.hideEntry(entry));
 
 		const rerunBtn = headerRow.createEl('button', { cls: 'filedrop-entry-rerun', text: '↺' });
@@ -518,7 +518,15 @@ export class FileDropView extends ItemView {
 	}
 
 	private hideEntry(entry: DroppedFile): void {
-		this.hiddenNotePaths.add(entry.notePath);
+		const s = entry.status ?? 'unknown';
+		if (s === 'moving' || isConvertingStatus(s)) {
+			this.plugin.cancelConversion(entry.notePath);
+		}
+		const idx = this.plugin.recentFiles.findIndex((e) => e.notePath === entry.notePath);
+		if (idx !== -1) {
+			this.plugin.recentFiles.splice(idx, 1);
+			void this.plugin.saveSettings();
+		}
 		this.renderFileList();
 	}
 

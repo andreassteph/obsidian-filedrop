@@ -90,6 +90,7 @@ export const LLM_PROVIDERS: Record<string, ProviderDefault> = {
 };
 
 export type FileDropStatus =
+	| 'unknown'
 	| 'moving'
 	| 'converting'
 	| 'converting-markitdown'
@@ -100,6 +101,7 @@ export type FileDropStatus =
 	| 'error';
 
 export const STATUS_LABELS: Record<FileDropStatus, string> = {
+	unknown: 'unknown',
 	moving: 'moving',
 	converting: 'converting',
 	'converting-markitdown': 'converting (markitdown)',
