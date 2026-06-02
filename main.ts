@@ -4,6 +4,7 @@ import {
 	DEFAULT_SETTINGS,
 	DroppedFile,
 	FileDropSettings,
+	LlmGateway,
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
@@ -12,7 +13,7 @@ import {
 	parsePreferredTags,
 	suggestTags,
 } from './src/settings';
-import { runMarkitdown, runMsgConversion } from './src/convert';
+import { MsgAttachment, OnPhase, runMarkitdown, runMsgConversion } from './src/convert';
 import { dedupeName, getMonthSlug, noteNameFromFile, replaceTagsBlock } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
@@ -169,6 +170,12 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 
+			const onPhase: OnPhase = (phase) => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+				this.getActiveView()?.renderFileList();
+			};
+
+			const sources: { rawName: string; absolutePath: string; isMsg: boolean }[] = [];
 			for (const file of files) {
 				const buffer = await file.arrayBuffer();
 				let rawName = file.name;
@@ -185,45 +192,29 @@ export default class FileDropPlugin extends Plugin {
 				);
 
 				const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-				const onPhase = (phase: 'markitdown' | 'llm-image') => {
-					entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
-					this.getActiveView()?.renderFileList();
-				};
-
-				const isMsgFile =
+				const isMsg =
 					rawName.toLowerCase().endsWith('.msg') ||
 					file.type === 'application/vnd.ms-outlook' ||
 					file.type === 'application/x-msg';
-
-				let markdown: string;
-				try {
-					if (isMsgFile) {
-						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
-						const attParts: string[] = [msgResult.body];
-						for (const att of msgResult.attachments) {
-							if (!att.markdown) continue;
-							const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
-							const attBuf = Buffer.from(att.dataB64, 'base64');
-							const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-							await vault.adapter.writeBinary(attPath, ab);
-							attachmentFrontmatterLines.push(
-								`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
-							);
-							attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
-							if (isErrorBody(att.markdown)) anyError = true;
-						}
-						markdown = attParts.join('\n\n');
-					} else {
-						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
-					}
-					if (isErrorBody(markdown)) anyError = true;
-				} catch (e) {
-					markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
-					anyError = true;
-				}
-
-				bodyParts.push(`## ${rawName}\n\n${markdown}`);
+				sources.push({ rawName, absolutePath, isMsg });
 			}
+
+			const { bodyParts: convertedParts, anyError: convertError } = await this.convertGroupFiles(
+				sources,
+				gateway,
+				onPhase,
+				async (att) => {
+					const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
+					const attBuf = Buffer.from(att.dataB64, 'base64');
+					const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+					await vault.adapter.writeBinary(attPath, ab);
+					attachmentFrontmatterLines.push(
+						`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
+					);
+				},
+			);
+			bodyParts.push(...convertedParts);
+			if (convertError) anyError = true;
 
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
@@ -434,10 +425,17 @@ export default class FileDropPlugin extends Plugin {
 				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
 				: null;
 
-			const onPhase = (phase: 'markitdown' | 'llm-image') => {
+			const onPhase: OnPhase = (phase) => {
 				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
+
+			// Group entries store the .group directory as filePath, not a single
+			// file — re-convert each original source file inside it instead.
+			if (entry.filePath.endsWith('.group')) {
+				await this.rerunGroupConversion(entry, basePath, gateway, onPhase);
+				return;
+			}
 
 			const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
 			let newBody: string;
@@ -481,6 +479,113 @@ export default class FileDropPlugin extends Plugin {
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
 		}
+	}
+
+	// Convert each source file into a `## <name>` markdown section. Shared by the
+	// initial group drop and group re-runs. For .msg files the attachments are
+	// inlined into the body; the optional `sink` lets the caller persist each
+	// attachment (write the binary + frontmatter link) — re-runs omit it so no
+	// files or frontmatter are touched.
+	private async convertGroupFiles(
+		sources: { rawName: string; absolutePath: string; isMsg: boolean }[],
+		gateway: LlmGateway | null,
+		onPhase: OnPhase,
+		sink?: (att: MsgAttachment) => Promise<void>,
+	): Promise<{ bodyParts: string[]; anyError: boolean }> {
+		const bodyParts: string[] = [];
+		let anyError = false;
+
+		for (const { rawName, absolutePath, isMsg } of sources) {
+			let markdown: string;
+			try {
+				if (isMsg) {
+					const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+					const attParts: string[] = [msgResult.body];
+					for (const att of msgResult.attachments) {
+						if (!att.markdown) continue;
+						if (sink) await sink(att);
+						attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+						if (isErrorBody(att.markdown)) anyError = true;
+					}
+					markdown = attParts.join('\n\n');
+				} else {
+					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+				}
+				if (isErrorBody(markdown)) anyError = true;
+			} catch (e) {
+				markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
+				anyError = true;
+			}
+
+			bodyParts.push(`## ${rawName}\n\n${markdown}`);
+		}
+
+		return { bodyParts, anyError };
+	}
+
+	// Re-convert a file group: rebuild the combined body from the original source
+	// files in the .group directory, preserving the note's existing frontmatter.
+	private async rerunGroupConversion(
+		entry: DroppedFile,
+		basePath: string | undefined,
+		gateway: LlmGateway | null,
+		onPhase: OnPhase,
+	): Promise<void> {
+		const { vault } = this.app;
+
+		const noteFile = vault.getAbstractFileByPath(entry.notePath);
+		if (!(noteFile instanceof TFile)) return;
+		const content = await vault.read(noteFile);
+		const closingIdx = content.indexOf('\n---\n');
+		if (closingIdx < 0) return;
+		const noteBody = content.slice(closingIdx + 5);
+
+		// Only re-convert the original source files. Extracted .msg attachments
+		// live as siblings in the same directory but appear in the body only as
+		// `## Attachment: <name>`, so excluding those avoids double-counting them.
+		const groupFiles = vault
+			.getFiles()
+			.filter((f) => f.path.startsWith(entry.filePath + '/'))
+			.sort((a, b) => a.path.localeCompare(b.path));
+		let sourceFiles = groupFiles.filter((f) => this.noteHasSourceHeading(noteBody, f.name));
+		if (sourceFiles.length === 0) {
+			// Legacy/edited note with no recognizable headings — fall back to every
+			// file that isn't exclusively an extracted attachment.
+			sourceFiles = groupFiles.filter((f) => !this.noteHasAttachmentHeading(noteBody, f.name));
+		}
+
+		const sources = sourceFiles.map((f) => ({
+			rawName: f.name,
+			absolutePath: basePath ? pathJoin(basePath, f.path) : f.path,
+			isMsg: f.name.toLowerCase().endsWith('.msg'),
+		}));
+
+		const { bodyParts, anyError } = await this.convertGroupFiles(sources, gateway, onPhase);
+		const newBody = bodyParts.join('\n\n---\n\n');
+
+		entry.status = 'converting-llm-tags';
+		this.getActiveView()?.renderFileList();
+
+		const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
+		const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
+		const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
+
+		await vault.modify(noteFile, frontmatter + '\n' + newBody);
+
+		entry.tags = [...mergedTags];
+		entry.status = anyError ? 'error' : 'converted';
+		await this.saveSettings();
+		this.getActiveView()?.renderFileList();
+	}
+
+	private noteHasSourceHeading(body: string, name: string): boolean {
+		const target = `## ${name}`;
+		return body.split('\n').some((line) => line.trimEnd() === target);
+	}
+
+	private noteHasAttachmentHeading(body: string, name: string): boolean {
+		const target = `## Attachment: ${name}`;
+		return body.split('\n').some((line) => line.trimEnd() === target);
 	}
 
 	async syncIncomingFolder(): Promise<void> {
