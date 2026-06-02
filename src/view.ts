@@ -16,6 +16,9 @@ export class FileDropView extends ItemView {
 	private showVerified = false;
 	private groupBtnEl: HTMLButtonElement | null = null;
 	private groupStatusEl: HTMLElement | null = null;
+	private currentNoteSection: HTMLElement | null = null;
+	private currentNotePathEl: HTMLElement | null = null;
+	private currentNoteActionRow: HTMLElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: FileDropPlugin) {
 		super(leaf);
@@ -41,8 +44,66 @@ export class FileDropView extends ItemView {
 			this.selectedGatewayId = this.modelSelectEl!.value || null;
 		});
 
+		// Collapsible "Current note" section (above drop area, starts collapsed)
+		this.currentNoteSection = container.createDiv({ cls: 'filedrop-droparea filedrop-currentnote-section filedrop-droparea--collapsed' });
+		const currentNoteHeader = this.currentNoteSection.createDiv({ cls: 'filedrop-droparea-header' });
+		currentNoteHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
+		currentNoteHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Current note' });
+		currentNoteHeader.addEventListener('click', () => {
+			this.currentNoteSection!.toggleClass('filedrop-droparea--collapsed', !this.currentNoteSection!.hasClass('filedrop-droparea--collapsed'));
+		});
+		const currentNoteBody = this.currentNoteSection.createDiv({ cls: 'filedrop-droparea-body' });
+		this.currentNotePathEl = currentNoteBody.createDiv({ cls: 'filedrop-currentnote-path', text: 'No note open' });
+		this.currentNoteActionRow = currentNoteBody.createDiv({ cls: 'filedrop-currentnote-actions' });
+
+		const cnSummaryBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-summary', text: 'Add summary' });
+		cnSummaryBtn.title = 'Generate summary with the selected LLM';
+		cnSummaryBtn.addEventListener('click', async () => {
+			cnSummaryBtn.disabled = true;
+			cnSummaryBtn.setText('Summarizing…');
+			try {
+				await this.summarizeCurrentNote();
+			} finally {
+				cnSummaryBtn.disabled = false;
+				cnSummaryBtn.setText('Add summary');
+			}
+		});
+
+		const cnTagsBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-suggest-tags', text: 'Suggest tags' });
+		cnTagsBtn.title = 'Suggest tags with the selected LLM';
+		cnTagsBtn.addEventListener('click', async () => {
+			cnTagsBtn.disabled = true;
+			cnTagsBtn.setText('Suggesting…');
+			try {
+				await this.suggestTagsForCurrentNote();
+			} finally {
+				cnTagsBtn.disabled = false;
+				cnTagsBtn.setText('Suggest tags');
+			}
+		});
+
+		if (this.plugin.settings.referenceGroups.length > 0) {
+			const cnRefsBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-add-refs', text: 'Add references' });
+			cnRefsBtn.title = 'Find and add references to matching notes';
+			cnRefsBtn.addEventListener('click', async () => {
+				cnRefsBtn.disabled = true;
+				cnRefsBtn.setText('Finding references…');
+				try {
+					await this.addReferencesForCurrentNote();
+				} finally {
+					cnRefsBtn.disabled = false;
+					cnRefsBtn.setText('Add references');
+				}
+			});
+		}
+
+		this.updateCurrentNotePanel(this.app.workspace.getActiveFile());
+		this.registerEvent(this.app.workspace.on('file-open', (file) => {
+			this.updateCurrentNotePanel(file ?? null);
+		}));
+
 		// Collapsible drop area (category + drop zone)
-		const dropSection = container.createDiv({ cls: 'filedrop-droparea' });
+		const dropSection = container.createDiv({ cls: 'filedrop-droparea filedrop-dropfiles-section' });
 		const dropHeader = dropSection.createDiv({ cls: 'filedrop-droparea-header' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Drop files' });
@@ -203,6 +264,21 @@ export class FileDropView extends ItemView {
 		).open();
 	}
 
+	private updateCurrentNotePanel(file: TFile | null): void {
+		if (!this.currentNotePathEl || !this.currentNoteActionRow) return;
+		const isMarkdown = file instanceof TFile && file.extension === 'md';
+		if (!file) {
+			this.currentNotePathEl.setText('No note open');
+			this.currentNoteActionRow.style.display = 'none';
+		} else if (!isMarkdown) {
+			this.currentNotePathEl.setText(`${file.path} (not a markdown note)`);
+			this.currentNoteActionRow.style.display = 'none';
+		} else {
+			this.currentNotePathEl.setText(file.path);
+			this.currentNoteActionRow.style.display = '';
+		}
+	}
+
 	renderFileList(): void {
 		if (!this.fileListEl) return;
 		this.fileListEl.empty();
@@ -353,13 +429,17 @@ export class FileDropView extends ItemView {
 	}
 
 	private async addReferencesForEntry(entry: DroppedFile): Promise<void> {
-		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
-
 		const noteFile = this.app.vault.getAbstractFileByPath(entry.notePath);
 		if (!(noteFile instanceof TFile)) {
 			new Notice('FileDrop: could not find the note.');
 			return;
 		}
+		await this.addReferencesForNote(noteFile, entry.filePath);
+	}
+
+	private async addReferencesForNote(noteFile: TFile, sourceFilePath?: string): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		const filePath = sourceFilePath ?? noteFile.path;
 
 		const content = await this.app.vault.read(noteFile);
 		const fmEnd = content.indexOf('\n---\n');
@@ -375,15 +455,13 @@ export class FileDropView extends ItemView {
 		const hasCachedPeople = 'file_people' in rawFm && rawFm.file_people;
 
 		if (hasCachedDate && hasCachedType && hasCachedPeople) {
-			// Use cached metadata if all fields exist
 			metadata = {
 				date: String(rawFm.file_date),
 				type: String(rawFm.file_type),
 				people: Array.isArray(rawFm.file_people) ? rawFm.file_people.map(String) : null,
 			};
 		} else {
-			// Extract fresh and optionally fill gaps
-			metadata = extractActivityMetadata(body, entry.filePath, noteFile.stat);
+			metadata = extractActivityMetadata(body, filePath, noteFile.stat);
 			const gatewayActive = !!gateway && isGatewayEnabled(gateway);
 			const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
 
@@ -401,7 +479,7 @@ export class FileDropView extends ItemView {
 		if (gatewayActive && !existingSummary) {
 			const summaryResult = await summarizeContent(body, gateway!, undefined, () => this.plugin.saveSettings());
 			if (summaryResult.ok) {
-				await this.writeNoteSummary(entry.notePath, summaryResult.value);
+				await this.writeNoteSummary(noteFile.path, summaryResult.value);
 				summary = summaryResult.value;
 			}
 		}
@@ -434,7 +512,7 @@ export class FileDropView extends ItemView {
 			}
 		}
 
-		new ReferenceModal(this.app, this.plugin, entry, noteFile, metadata, summary, matchedNotes, matchResult?.ok ?? false, gateway).open();
+		new ReferenceModal(this.app, this.plugin, noteFile.basename, noteFile, metadata, summary, matchedNotes, matchResult?.ok ?? false, gateway).open();
 	}
 
 	private hideEntry(entry: DroppedFile): void {
@@ -603,6 +681,82 @@ export class FileDropView extends ItemView {
 		const merged = Array.from(new Set([...entry.tags, ...result.value]));
 		await this.updateEntryTags(index, merged);
 		new Notice('FileDrop: tags suggested.');
+	}
+
+	private async summarizeCurrentNote(): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		if (!gateway || !isGatewayEnabled(gateway)) {
+			new Notice('FileDrop: select an LLM model first.');
+			return;
+		}
+
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const i = content.indexOf('\n---\n');
+		const body = i >= 0 ? content.slice(i + 5) : content;
+
+		const result = await summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings());
+		if (!result.ok) {
+			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
+			return;
+		}
+
+		let metadata = extractActivityMetadata(body, file.path, file.stat);
+		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+		if (isGatewayEnabled(gateway) && hasNullMetadata) {
+			const fillResult = await fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings());
+			if (fillResult.ok) metadata = fillResult.value;
+		}
+
+		await this.writeNoteSummaryAndMetadata(file.path, result.value, metadata);
+		new Notice('FileDrop: summary added.');
+	}
+
+	private async suggestTagsForCurrentNote(): Promise<void> {
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		if (!gateway || !isGatewayEnabled(gateway)) {
+			new Notice('FileDrop: select an LLM model first.');
+			return;
+		}
+
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const i = content.indexOf('\n---\n');
+		const body = i >= 0 ? content.slice(i + 5) : content;
+
+		const result = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags), undefined, () => this.plugin.saveSettings());
+		if (!result.ok) {
+			new Notice(`FileDrop: could not suggest tags — ${this.llmErrorMessage(result.reason, result.detail)}.`);
+			return;
+		}
+		if (result.value.length === 0) {
+			new Notice('FileDrop: the LLM suggested no tags for this content.');
+			return;
+		}
+
+		const existing: string[] = this.app.metadataCache.getFileCache(file)?.frontmatter?.tags ?? [];
+		const merged = Array.from(new Set([...existing, ...result.value]));
+		await this.rewriteNoteTags(file.path, merged);
+		new Notice('FileDrop: tags suggested.');
+	}
+
+	private async addReferencesForCurrentNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+		await this.addReferencesForNote(file);
 	}
 
 	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {

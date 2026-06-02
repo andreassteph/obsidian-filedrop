@@ -1,6 +1,6 @@
 import { App, Modal, Notice, TFile } from 'obsidian';
 
-import { DroppedFile, LlmGateway, isGatewayEnabled } from './settings';
+import { LlmGateway, isGatewayEnabled } from './settings';
 import {
 	ActivityMetadata,
 	MatchedNote,
@@ -14,7 +14,7 @@ import type FileDropPlugin from '../main';
 
 export class ReferenceModal extends Modal {
 	private plugin: FileDropPlugin;
-	private entry: DroppedFile;
+	private filename: string;
 	private noteFile: TFile;
 	private metadata: ActivityMetadata;
 	private summary: string;
@@ -25,7 +25,7 @@ export class ReferenceModal extends Modal {
 	constructor(
 		app: App,
 		plugin: FileDropPlugin,
-		entry: DroppedFile,
+		filename: string,
 		noteFile: TFile,
 		metadata: ActivityMetadata,
 		summary: string,
@@ -35,7 +35,7 @@ export class ReferenceModal extends Modal {
 	) {
 		super(app);
 		this.plugin = plugin;
-		this.entry = entry;
+		this.filename = filename;
 		this.noteFile = noteFile;
 		this.metadata = metadata;
 		this.summary = summary;
@@ -46,7 +46,7 @@ export class ReferenceModal extends Modal {
 
 	onOpen(): void {
 		const { contentEl } = this;
-		contentEl.createEl('h2', { text: `Add References — ${this.entry.filename}` });
+		contentEl.createEl('h2', { text: `Add References — ${this.filename}` });
 
 		if (this.matchedNotes.length === 0) {
 			contentEl.createEl('p', { text: 'No matching notes found.' });
