@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.4.2 — Reorganize drop controls and update documentation
+
+### Changes
+
+- Move group button and category dropdown into a dedicated controls row for better UI organization
+- Update CLAUDE.md documentation for references engine and shared LLM layer
+
 ## 0.4.1 — Add current note sidebar panel and LLM temperature auto-adjustment
 
 ### Changes
