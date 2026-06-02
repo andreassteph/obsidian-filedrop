@@ -121,6 +121,13 @@ def _vision_enabled(env):
     return (env.get("FILEDROP_LLM_VISION") or "1").strip().lower() not in ("0", "false", "no", "off")
 
 
+def _temperature_kwargs(env):
+    """Return {"temperature": 0} when the model supports it, or {} to omit it.
+    FILEDROP_LLM_TEMPERATURE=0 means not supported (e.g. reasoning models)."""
+    supported = (env.get("FILEDROP_LLM_TEMPERATURE") or "1").strip().lower() not in ("0", "false", "no", "off")
+    return {"temperature": 0} if supported else {}
+
+
 def build_converter(env):
     client = _make_client(env)
     _install_thinking_filter(client)
@@ -237,6 +244,7 @@ def _convert_pdf_pages_with_llm(path, env):
                     ],
                 }],
                 **_token_kwargs(env, 4096),
+                **_temperature_kwargs(env),
             )
             text = (resp.choices[0].message.content or "").strip()
             text = strip_thinking(text)
@@ -265,6 +273,7 @@ def describe(path, env):
         model=env["FILEDROP_LLM_MODEL"],
         messages=[{"role": "user", "content": prompt}],
         **_token_kwargs(env, 2048),
+        **_temperature_kwargs(env),
     )
     return response.choices[0].message.content or ""
 

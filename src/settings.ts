@@ -11,6 +11,7 @@ export interface ModelCapabilities {
 	tokenParam: 'max_tokens' | 'max_completion_tokens' | 'none'; // 'none' => omit the token-limit param entirely
 	systemRole: boolean;   // false => fold the system message into the user message
 	vision: boolean;       // image_url content accepted
+	temperature: boolean;  // false => omit temperature (e.g. reasoning models that reject it)
 	checkedAt?: string;    // ISO timestamp of the last successful probe/auto-detect
 }
 
@@ -18,6 +19,7 @@ export const DEFAULT_CAPABILITIES: ModelCapabilities = {
 	tokenParam: 'max_tokens',
 	systemRole: true,
 	vision: true,
+	temperature: true,
 };
 
 export interface LlmGateway {
@@ -425,7 +427,7 @@ export function buildChatBody(
 	const messages = caps.systemRole ? opts.messages : foldSystemRole(opts.messages);
 	const body: Record<string, unknown> = { model: opts.model, messages };
 	if (caps.tokenParam !== 'none') body[caps.tokenParam] = opts.maxTokens;
-	if (opts.temperature !== undefined) body.temperature = opts.temperature;
+	if (opts.temperature !== undefined && caps.temperature !== false) body.temperature = opts.temperature;
 	return body;
 }
 
@@ -446,6 +448,9 @@ export function detectCapabilityFix(detail: string, caps: ModelCapabilities): Pa
 	}
 	if (caps.vision && /image|vision|multimodal|modalit/.test(d)) {
 		return { vision: false };
+	}
+	if (caps.temperature !== false && d.includes('temperature') && /unsupported|not supported|does not support|invalid/.test(d)) {
+		return { temperature: false };
 	}
 	return null;
 }
@@ -575,7 +580,7 @@ export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
 	const steps: ProbeStep[] = [];
 	const caps: ModelCapabilities = { ...DEFAULT_CAPABILITIES };
 
-	// Stage 1 — reachability, token-limit param, and system-role support.
+	// Stage 1 — reachability, token-limit param, system-role, and temperature support.
 	const textMessages: ChatMessage[] = [
 		{ role: 'system', content: 'You are a connectivity test.' },
 		{ role: 'user', content: 'Reply with the single word: ok' },
@@ -585,7 +590,7 @@ export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
 	for (let attempt = 0; attempt < 4 && !reached; attempt++) {
 		let res: Awaited<ReturnType<typeof requestUrl>> | null;
 		try {
-			res = await send(buildChatBody(caps, { model: gw.model, messages: textMessages, maxTokens: 16 }));
+			res = await send(buildChatBody(caps, { model: gw.model, messages: textMessages, maxTokens: 16, temperature: 0 }));
 		} catch (e) {
 			steps.push({ label: 'Reachable via chat completion', status: 'fail', detail: String(e) });
 			return { ok: false, steps };
@@ -626,6 +631,11 @@ export async function probeModel(gw: LlmGateway): Promise<ProbeResult> {
 		caps.systemRole
 			? { label: 'System role', status: 'ok', detail: 'supported' }
 			: { label: 'System role', status: 'warn', detail: 'not supported — folding into the user message' }
+	);
+	steps.push(
+		caps.temperature !== false
+			? { label: 'Temperature parameter', status: 'ok', detail: 'supported' }
+			: { label: 'Temperature parameter', status: 'warn', detail: 'not supported — omitting temperature from requests' }
 	);
 
 	// Stage 2 — vision / image input.

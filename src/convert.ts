@@ -174,6 +174,7 @@ function describeExecutable(absolutePath: string, pythonCommand: string, gateway
 					FILEDROP_LLM_KEY: gateway?.apiKey,
 					FILEDROP_LLM_MODEL: gateway?.model,
 					FILEDROP_LLM_TOKEN_PARAM: gateway ? getCapabilities(gateway).tokenParam : undefined,
+					FILEDROP_LLM_TEMPERATURE: gateway ? (getCapabilities(gateway).temperature !== false ? '1' : '0') : undefined,
 					FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 				},
 			},
@@ -236,7 +237,8 @@ export async function runMarkitdown(
 						FILEDROP_LLM_MODEL: gateway.model,
 						FILEDROP_LLM_PROMPT: gateway.prompt,
 						FILEDROP_LLM_TOKEN_PARAM: getCapabilities(gateway).tokenParam,
-						FILEDROP_LLM_VISION: getCapabilities(gateway).vision ? '1' : '0',
+						FILEDROP_LLM_VISION: getCapabilities(gateway).vision !== false ? '1' : '0',
+						FILEDROP_LLM_TEMPERATURE: getCapabilities(gateway).temperature !== false ? '1' : '0',
 						FILEDROP_LLM_TIMEOUT: String(PYTHON_LLM_TIMEOUT_S),
 						FILEDROP_DESCRIBE_EXTS: describeExtensions,
 					},
@@ -363,7 +365,8 @@ export async function runMsgConversion(
 		env.FILEDROP_LLM_MODEL = gateway.model;
 		env.FILEDROP_LLM_PROMPT = gateway.prompt;
 		env.FILEDROP_LLM_TOKEN_PARAM = getCapabilities(gateway).tokenParam;
-		env.FILEDROP_LLM_VISION = getCapabilities(gateway).vision ? '1' : '0';
+		env.FILEDROP_LLM_VISION = getCapabilities(gateway).vision !== false ? '1' : '0';
+		env.FILEDROP_LLM_TEMPERATURE = getCapabilities(gateway).temperature !== false ? '1' : '0';
 		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
 	}
 
