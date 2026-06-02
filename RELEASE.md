@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.4.1 — Add current note sidebar panel and LLM temperature auto-adjustment
+
+### Changes
+
+- Add current note panel to sidebar for quick reference to the active note
+- Add temperature capability detection and auto-adjustment for LLM calls based on gateway capabilities
+
 ## 0.4.0 — Add change summary dialog and follow-up todos for references
 
 ### Changes
