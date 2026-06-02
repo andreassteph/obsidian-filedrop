@@ -107,7 +107,13 @@ export class FileDropView extends ItemView {
 		const dropHeader = dropSection.createDiv({ cls: 'filedrop-droparea-header' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
 		dropHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Drop files' });
-		this.groupBtnEl = dropHeader.createEl('button', { cls: 'filedrop-group-btn', text: 'Group' });
+		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
+		dropHeader.addEventListener('click', () => {
+			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
+		});
+
+		const controlsRow = dropBody.createDiv({ cls: 'filedrop-controls-row' });
+		this.groupBtnEl = controlsRow.createEl('button', { cls: 'filedrop-group-btn', text: 'Group' });
 		this.groupBtnEl.title = 'Toggle group mode — batch multiple files into one note';
 		this.groupBtnEl.addEventListener('click', (e) => {
 			e.stopPropagation();
@@ -121,7 +127,7 @@ export class FileDropView extends ItemView {
 				this.plugin.startGroupMode(this.selectedCategory, this.selectedGatewayId);
 			}
 		});
-		const categorySelect = dropHeader.createEl('select', { cls: 'filedrop-category-select' });
+		const categorySelect = controlsRow.createEl('select', { cls: 'filedrop-category-select' });
 		this.plugin.settings.categories.forEach((cat) => {
 			const opt = categorySelect.createEl('option', { value: cat, text: cat });
 			if (cat === this.selectedCategory) opt.selected = true;
@@ -130,10 +136,6 @@ export class FileDropView extends ItemView {
 			this.selectedCategory = categorySelect.value;
 		});
 		categorySelect.addEventListener('click', (e) => e.stopPropagation());
-		const dropBody = dropSection.createDiv({ cls: 'filedrop-droparea-body' });
-		dropHeader.addEventListener('click', () => {
-			dropSection.toggleClass('filedrop-droparea--collapsed', !dropSection.hasClass('filedrop-droparea--collapsed'));
-		});
 
 		// Group status bar (hidden when group mode is off)
 		this.groupStatusEl = dropBody.createDiv({ cls: 'filedrop-group-status' });

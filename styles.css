@@ -70,7 +70,7 @@
   transform: rotate(-90deg);
 }
 
-.filedrop-droparea-header .filedrop-category-select {
+.filedrop-controls-row .filedrop-category-select {
   margin-left: auto;
   flex-shrink: 0;
   font-size: var(--font-ui-small);
@@ -90,15 +90,18 @@
   min-height: 0;
 }
 
+.filedrop-controls-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
 .filedrop-droparea--collapsed {
   flex: 0 0 auto;
 }
 
 .filedrop-droparea--collapsed .filedrop-droparea-body {
-  display: none;
-}
-
-.filedrop-droparea--collapsed .filedrop-droparea-header .filedrop-category-select {
   display: none;
 }
 
