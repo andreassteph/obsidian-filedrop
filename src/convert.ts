@@ -97,13 +97,15 @@ const MARKITDOWN_TIMEOUT_MS = 30_000;
 // Node-side subprocess cap so a stuck request fails with a precise Python
 // error message before Node SIGTERMs the whole subprocess.
 const PYTHON_LLM_TIMEOUT_S = 150;
-// Node-side subprocess caps. Add headroom over PYTHON_LLM_TIMEOUT_S so a
-// single slow-but-eventually-finishing request doesn't get killed mid-flight.
+// Node-side subprocess cap for a single LLM request (e.g. the describe guess).
+// Add headroom over PYTHON_LLM_TIMEOUT_S so a slow-but-eventually-finishing
+// request doesn't get killed mid-flight.
 const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
-// MSG conversion runs body + every attachment through the LLM sequentially,
-// so scanned PDFs with many pages need a much larger overall budget — but
-// each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
-const MSG_LLM_TIMEOUT_MS = 720_000;
+// Document conversion runs many LLM requests sequentially — scanned PDFs are
+// OCR'd page by page, and .msg conversion processes the body plus every
+// attachment — so the overall subprocess needs a much larger budget. Each
+// individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
+const DOC_LLM_TIMEOUT_MS = 720_000;
 
 function conversionErrorBody(title: string, detail: string): string {
 	return `> [!error] Conversion error: ${title}\n> ${detail.replace(/\n/g, '\n> ')}`;
@@ -227,7 +229,7 @@ export async function runMarkitdown(
 				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
-					timeout: LLM_TIMEOUT_MS,
+					timeout: DOC_LLM_TIMEOUT_MS,
 					maxBuffer: 200 * 1024 * 1024,
 					env: {
 						...process.env,
@@ -357,7 +359,7 @@ export async function runMsgConversion(
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
 	}
 	const useGateway = gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
-	const timeout = useGateway ? MSG_LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
+	const timeout = useGateway ? DOC_LLM_TIMEOUT_MS : MARKITDOWN_TIMEOUT_MS;
 	const env: NodeJS.ProcessEnv = { ...process.env };
 	if (useGateway && gateway) {
 		env.FILEDROP_LLM_URL = gateway.baseUrl;
