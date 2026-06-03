@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.5.0 — Add clipboard paste and UI improvements
+
+### Changes
+
+- Add paste-from-clipboard button to drop area for easier file insertion
+- Add hide button to cancel conversions and remove entries from memory
+- Add LLM configuration documentation
+- Improve conversion controls UI
+
 ## 0.4.2 — Reorganize drop controls and update documentation
 
 ### Changes
