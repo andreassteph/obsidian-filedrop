@@ -1,7 +1,7 @@
 import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
 import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
-import { replaceTagsBlock } from './utils';
+import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote, ActivityMetadata } from './references';
 import { ReferenceModal } from './reference-modal';
 import type FileDropPlugin from '../main';
@@ -137,6 +137,21 @@ export class FileDropView extends ItemView {
 		});
 		categorySelect.addEventListener('click', (e) => e.stopPropagation());
 
+		const pasteBtn = controlsRow.createEl('button', { cls: 'filedrop-paste-btn', text: '📋 Paste' });
+		pasteBtn.title = 'Paste clipboard image, text, or file into the vault';
+		pasteBtn.addEventListener('click', async (e) => {
+			e.stopPropagation();
+			pasteBtn.disabled = true;
+			const original = pasteBtn.getText();
+			pasteBtn.setText('Pasting…');
+			try {
+				await this.pasteFromClipboard();
+			} finally {
+				pasteBtn.disabled = false;
+				pasteBtn.setText(original);
+			}
+		});
+
 		// Group status bar (hidden when group mode is off)
 		this.groupStatusEl = dropBody.createDiv({ cls: 'filedrop-group-status' });
 		this.groupStatusEl.style.display = 'none';
@@ -206,6 +221,46 @@ export class FileDropView extends ItemView {
 
 	async onClose(): Promise<void> {
 		// nothing to clean up
+	}
+
+	// Read the clipboard and route its first usable representation (image, then
+	// text, then any other blob) through the normal drop pipeline. Images and
+	// text request a content-derived filename; anything else keeps the
+	// algorithmic `pasted-<timestamp>` name. Group mode (if active) queues it.
+	private async pasteFromClipboard(): Promise<void> {
+		if (!navigator.clipboard || typeof navigator.clipboard.read !== 'function') {
+			new Notice('FileDrop: clipboard access is not available here');
+			return;
+		}
+
+		let clipItems: ClipboardItem[];
+		try {
+			clipItems = await navigator.clipboard.read();
+		} catch (err) {
+			new Notice(`FileDrop: could not read clipboard — ${err instanceof Error ? err.message : String(err)}`);
+			return;
+		}
+		if (clipItems.length === 0) {
+			new Notice('FileDrop: clipboard is empty');
+			return;
+		}
+
+		const item = clipItems[0];
+		// Prefer an image, then plain text, then any remaining representation.
+		const imageType = item.types.find((t) => t.startsWith('image/'));
+		const type = imageType ?? (item.types.includes('text/plain') ? 'text/plain' : item.types[0]);
+		if (!type) {
+			new Notice('FileDrop: nothing usable on the clipboard');
+			return;
+		}
+
+		const blob = await item.getType(type);
+		const nameFromContent = type.startsWith('image/') || type.startsWith('text/');
+		const ext = extFromMime(type);
+		const fileName = ext ? `${pastedBaseName()}.${ext}` : pastedBaseName();
+		const file = new File([blob], fileName, { type });
+
+		await this.plugin.processDroppedFile(file, this.selectedCategory, this.selectedGatewayId, { nameFromContent });
 	}
 
 	private populateModelSelect(el: HTMLSelectElement): void {
