@@ -244,6 +244,11 @@ def _warning_callout(detail):
     return f"> [!warning] {body}"
 
 
+def _info_callout(detail):
+    body = (detail or "").replace("\n", "\n> ")
+    return f"> [!info] {body}"
+
+
 def _unsupported_detail(exc):
     # markitdown raises UnsupportedFormatException for file types it can't read.
     # Match it by class name so we don't need to import the symbol (it lives in
@@ -264,6 +269,12 @@ def _convert_file(path, llm_md, env):
     see what went wrong in the note itself.
     """
     filename = os.path.basename(path)
+
+    if path.lower().endswith(".gif"):
+        return _info_callout(
+            f"GIF attachments are not processed by markitdown.\n"
+            f"The file **{filename}** has been saved as an attachment."
+        )
 
     if llm_md is None:
         _emit_phase("markitdown")

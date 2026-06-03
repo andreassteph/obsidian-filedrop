@@ -263,7 +263,8 @@ export default class FileDropPlugin extends Plugin {
 							attachmentFrontmatterLines.push(
 								`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
 							);
-							attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+							const attLink = `[[${monthSlug}/${category}/${groupDirName}/${att.filename}|${att.filename}]]`;
+						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
 							if (isErrorBody(att.markdown)) anyError = true;
 						}
 						markdown = attParts.join('\n\n');
@@ -471,8 +472,8 @@ export default class FileDropPlugin extends Plugin {
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 
+				const attDirName = `${rawName}.attachments`;
 				if (msgResult.attachments.length > 0) {
-					const attDirName = `${rawName}.attachments`;
 					const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
 					await this.ensureDir(attDirPath);
 
@@ -488,7 +489,8 @@ export default class FileDropPlugin extends Plugin {
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
 					if (!att.markdown) continue;
-					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					const attLink = `[[${monthSlug}/${category}/${attDirName}/${att.filename}|${att.filename}]]`;
+					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
 					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				markdownBody = bodyParts.join('\n\n');
@@ -574,10 +576,19 @@ export default class FileDropPlugin extends Plugin {
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+				const rawMsgName = entry.filename.replace(/\.[^.]+$/, '');
+				const attDirName = `${rawMsgName}.attachments`;
+				const incomingPrefix = normalizePath(this.settings.incomingDir) + '/';
+				const rel = entry.filePath.startsWith(incomingPrefix)
+					? entry.filePath.slice(incomingPrefix.length)
+					: entry.filePath;
+				const rerunMonthSlug = rel.split('/')[0] ?? '';
+				const rerunCategory = entry.category;
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
 					if (!att.markdown) continue;
-					bodyParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					const attLink = `[[${rerunMonthSlug}/${rerunCategory}/${attDirName}/${att.filename}|${att.filename}]]`;
+					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
 					if (isErrorBody(att.markdown)) attachmentHadError = true;
 				}
 				newBody = bodyParts.join('\n\n');
