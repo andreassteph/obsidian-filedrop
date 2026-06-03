@@ -138,6 +138,20 @@ def test_convert_file_pptx_returns_error_callout_when_both_steps_fail():
     assert "llm boom" in result
 
 
+def test_convert_file_gif_returns_info_callout():
+    llm_md = MagicMock()
+    result = filedrop_msg._convert_file("/tmp/animation.gif", llm_md, dict(BASE_ENV))
+    assert result.startswith("> [!info]")
+    assert "animation.gif" in result
+    llm_md.convert.assert_not_called()
+
+
+def test_convert_file_gif_without_llm_returns_info_callout():
+    result = filedrop_msg._convert_file("/tmp/animation.gif", None, {})
+    assert result.startswith("> [!info]")
+    assert "animation.gif" in result
+
+
 def test_build_llm_markitdown_none_without_gateway():
     assert filedrop_msg._build_llm_markitdown({}) is None
 
