@@ -693,6 +693,30 @@
   border-color: var(--interactive-accent-hover);
 }
 
+.filedrop-paste-btn {
+  font-size: var(--font-ui-small);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  color: var(--text-muted);
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  box-shadow: none;
+  transition: background 120ms, color 120ms, border-color 120ms;
+}
+
+.filedrop-paste-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+
+.filedrop-paste-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
 /* Group status bar (shown inside drop area when group mode is on) */
 
 .filedrop-group-status {

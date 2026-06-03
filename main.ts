@@ -4,16 +4,18 @@ import {
 	DEFAULT_SETTINGS,
 	DroppedFile,
 	FileDropSettings,
+	LlmGateway,
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
 	isErrorBody,
 	migrateLegacyLlmFields,
 	parsePreferredTags,
+	suggestFilename,
 	suggestTags,
 } from './src/settings';
 import { runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, noteNameFromFile, replaceTagsBlock } from './src/utils';
+import { dedupeName, getMonthSlug, noteNameFromFile, replaceTagsBlock, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
@@ -44,6 +46,9 @@ export default class FileDropPlugin extends Plugin {
 	private groupCategory = '';
 	private groupGatewayId: string | null = null;
 	private groupTimeoutId: number | null = null;
+	// True when the active group contains pasted image/text, so the finalized
+	// group note is named from its combined content rather than the first file.
+	private groupNameFromContent = false;
 
 	get groupQueueCount(): number { return this.groupQueue.length; }
 	get groupCurrentName(): string { return this._groupName ?? ''; }
@@ -70,6 +75,7 @@ export default class FileDropPlugin extends Plugin {
 		this.groupModeActive = true;
 		this.groupQueue = [];
 		this._groupName = null;
+		this.groupNameFromContent = false;
 		this.groupCategory = category;
 		this.groupGatewayId = gatewayId;
 		this.getActiveView()?.onGroupModeChanged();
@@ -80,6 +86,7 @@ export default class FileDropPlugin extends Plugin {
 		this.groupModeActive = false;
 		this.groupQueue = [];
 		this._groupName = null;
+		this.groupNameFromContent = false;
 		this.getActiveView()?.onGroupModeChanged();
 	}
 
@@ -89,12 +96,14 @@ export default class FileDropPlugin extends Plugin {
 		const name = this._groupName ?? 'group';
 		const category = this.groupCategory;
 		const gatewayId = this.groupGatewayId;
+		const nameFromContent = this.groupNameFromContent;
 		this.groupModeActive = false;
 		this.groupQueue = [];
 		this._groupName = null;
+		this.groupNameFromContent = false;
 		this.getActiveView()?.onGroupModeChanged();
 		if (queue.length > 0) {
-			await this.processFileGroup(queue, name, category, gatewayId);
+			await this.processFileGroup(queue, name, category, gatewayId, nameFromContent);
 		}
 	}
 
@@ -122,11 +131,48 @@ export default class FileDropPlugin extends Plugin {
 		this.getActiveView()?.onGroupModeChanged();
 	}
 
+	// Ask the LLM for a content-derived base name and rename the already-written
+	// raw file to it (deduping within the folder). Returns the new raw name/path,
+	// or null to keep the provisional name (no gateway, weak/empty suggestion, or
+	// rename failure). Used for pasted images/text.
+	private async renameFromContent(
+		subfolderPath: string,
+		rawName: string,
+		rawFilePath: string,
+		content: string,
+		gateway: LlmGateway | null,
+	): Promise<{ rawName: string; rawFilePath: string } | null> {
+		const result = await suggestFilename(content, gateway, undefined, () => this.saveSettings());
+		if (!result.ok) return null;
+		const base = sanitizeFilename(result.value, '');
+		if (!base) return null;
+
+		const lastDot = rawName.lastIndexOf('.');
+		const ext = lastDot > 0 ? rawName.slice(lastDot) : '';
+		let candidate = `${base}${ext}`;
+		let candidatePath = normalizePath(`${subfolderPath}/${candidate}`);
+		let idx = 1;
+		while (candidatePath !== rawFilePath && (await this.app.vault.adapter.exists(candidatePath))) {
+			idx++;
+			candidate = dedupeName(`${base}${ext}`, idx);
+			candidatePath = normalizePath(`${subfolderPath}/${candidate}`);
+		}
+		if (candidatePath === rawFilePath) return null;
+
+		try {
+			await this.app.vault.adapter.rename(rawFilePath, candidatePath);
+		} catch {
+			return null;
+		}
+		return { rawName: candidate, rawFilePath: candidatePath };
+	}
+
 	private async processFileGroup(
 		files: File[],
 		groupBaseName: string,
 		category: string,
 		gatewayId: string | null,
+		nameFromContent = false,
 	): Promise<void> {
 		const { vault } = this.app;
 		const monthSlug = getMonthSlug();
@@ -136,8 +182,9 @@ export default class FileDropPlugin extends Plugin {
 		await this.ensureDir(normalizePath(`${this.settings.incomingDir}/${monthSlug}`));
 		await this.ensureDir(subfolderPath);
 
-		const groupDirName = `${groupBaseName}.group`;
-		const groupDirPath = normalizePath(`${subfolderPath}/${groupDirName}`);
+		// May be replaced once conversion gives us combined content to name from.
+		let groupDirName = `${groupBaseName}.group`;
+		let groupDirPath = normalizePath(`${subfolderPath}/${groupDirName}`);
 		await this.ensureDir(groupDirPath);
 
 		let noteName = noteNameFromFile(groupDirName);
@@ -236,6 +283,51 @@ export default class FileDropPlugin extends Plugin {
 			this.getActiveView()?.renderFileList();
 
 			const combinedBody = bodyParts.join('\n\n---\n\n');
+
+			// Pasted groups get a content-derived name. Rename the provisional
+			// `<base>.group` directory and recompute every path/link that embeds it
+			// so updateFileList stays consistent. Silent fallback on any failure.
+			if (nameFromContent && !anyError) {
+				const result = await suggestFilename(combinedBody, gateway, undefined, () => this.saveSettings());
+				const base = result.ok ? sanitizeFilename(result.value, '') : '';
+				if (base) {
+					let newDirName = `${base}.group`;
+					let newDirPath = normalizePath(`${subfolderPath}/${newDirName}`);
+					let newNotePath = normalizePath(`${subfolderPath}/${noteNameFromFile(newDirName)}.md`);
+					let idx = 1;
+					while (
+						newDirPath !== groupDirPath &&
+						((await vault.adapter.exists(newDirPath)) || (await vault.adapter.exists(newNotePath)))
+					) {
+						idx++;
+						newDirName = `${dedupeName(base, idx)}.group`;
+						newDirPath = normalizePath(`${subfolderPath}/${newDirName}`);
+						newNotePath = normalizePath(`${subfolderPath}/${noteNameFromFile(newDirName)}.md`);
+					}
+					if (newDirPath !== groupDirPath) {
+						try {
+							await vault.adapter.rename(groupDirPath, newDirPath);
+							const oldSegment = `/${groupDirName}/`;
+							const newSegment = `/${newDirName}/`;
+							for (let i = 0; i < attachmentFrontmatterLines.length; i++) {
+								attachmentFrontmatterLines[i] = attachmentFrontmatterLines[i].replace(oldSegment, newSegment);
+							}
+							groupBaseName = base;
+							groupDirName = newDirName;
+							groupDirPath = newDirPath;
+							noteName = noteNameFromFile(newDirName);
+							notePath = newNotePath;
+							entry.filename = `${base} (group, ${files.length} file${files.length !== 1 ? 's' : ''})`;
+							entry.filePath = groupDirPath;
+							entry.notePath = notePath;
+							this.getActiveView()?.renderFileList();
+						} catch {
+							/* keep provisional name */
+						}
+					}
+				}
+			}
+
 			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
@@ -290,8 +382,14 @@ export default class FileDropPlugin extends Plugin {
 		return leaves.length > 0 ? (leaves[0].view as FileDropView) : null;
 	}
 
-	async processDroppedFile(file: File, category: string, gatewayId: string | null): Promise<void> {
+	async processDroppedFile(
+		file: File,
+		category: string,
+		gatewayId: string | null,
+		opts?: { nameFromContent?: boolean },
+	): Promise<void> {
 		if (this.groupModeActive) {
+			if (opts?.nameFromContent) this.groupNameFromContent = true;
 			this.queueFileForGroup(file);
 			return;
 		}
@@ -323,7 +421,8 @@ export default class FileDropPlugin extends Plugin {
 			rawFilePath = normalizePath(`${subfolderPath}/${rawName}`);
 		}
 		// The raw name is already unique, so the derived note name is too.
-		const notePath = normalizePath(`${subfolderPath}/${noteNameFromFile(rawName)}.md`);
+		// Both may be replaced below once conversion gives us content to name from.
+		let notePath = normalizePath(`${subfolderPath}/${noteNameFromFile(rawName)}.md`);
 
 		// Insert placeholder immediately so the file appears in the list before
 		// any I/O starts. Not persisted yet — no stale entry survives a restart.
@@ -398,6 +497,23 @@ export default class FileDropPlugin extends Plugin {
 			}
 
 			if (this.cancelledConversions.delete(notePath)) return;
+
+			// Pasted images/text get a content-derived name now that conversion has
+			// produced something to name them from. Renames the raw file and updates
+			// the note path; falls back silently to the provisional `pasted-…` name
+			// when no gateway is configured or the call fails.
+			if (opts?.nameFromContent && !isMsgFile && !isErrorBody(markdownBody)) {
+				const renamed = await this.renameFromContent(subfolderPath, rawName, rawFilePath, markdownBody, gateway);
+				if (renamed) {
+					rawName = renamed.rawName;
+					rawFilePath = renamed.rawFilePath;
+					notePath = normalizePath(`${subfolderPath}/${noteNameFromFile(rawName)}.md`);
+					entry.filename = rawName;
+					entry.filePath = rawFilePath;
+					entry.notePath = notePath;
+					this.getActiveView()?.renderFileList();
+				}
+			}
 
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();

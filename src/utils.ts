@@ -19,6 +19,50 @@ export function dedupeName(fileName: string, i: number): string {
 	return `${fileName.slice(0, lastDot)}-${i}${fileName.slice(lastDot)}`;
 }
 
+// Local-time base name for pasted clipboard content, e.g. "pasted-2026-06-03-141530".
+// Includes seconds so repeated pastes within a minute stay unique on their own.
+export function pastedBaseName(): string {
+	const d = new Date();
+	const p = (n: number) => String(n).padStart(2, '0');
+	return `pasted-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
+}
+
+// Map a clipboard blob MIME type to a file extension (no dot).
+export function extFromMime(mime: string): string {
+	const m = (mime || '').toLowerCase().split(';')[0].trim();
+	const map: Record<string, string> = {
+		'image/png': 'png',
+		'image/jpeg': 'jpg',
+		'image/jpg': 'jpg',
+		'image/gif': 'gif',
+		'image/webp': 'webp',
+		'image/bmp': 'bmp',
+		'image/svg+xml': 'svg',
+		'text/plain': 'txt',
+		'text/html': 'html',
+		'text/markdown': 'md',
+	};
+	if (map[m]) return map[m];
+	const subtype = m.split('/')[1];
+	return subtype && /^[a-z0-9]+$/.test(subtype) ? subtype : 'bin';
+}
+
+// Turn an LLM-suggested label into a safe base filename (no extension):
+// lowercase, only [a-z0-9-], collapsed/trimmed dashes, capped length.
+// Returns `fallback` when nothing usable remains.
+export function sanitizeFilename(name: string, fallback: string): string {
+	const dot = name.lastIndexOf('.');
+	const base = dot > 0 ? name.slice(0, dot) : name;
+	const cleaned = base
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, '-')
+		.replace(/-+/g, '-')
+		.replace(/^-|-$/g, '')
+		.slice(0, 60)
+		.replace(/-$/, '');
+	return cleaned.length > 0 ? cleaned : fallback;
+}
+
 // Rewrite the frontmatter `tags` field to an inline JSON array of quoted strings,
 // e.g. `tags: ["a","b"]`. Obsidian's Properties editor re-serializes tags as a
 // multi-line YAML block list (`tags:\n  - a\n  - b`); we match that whole block —

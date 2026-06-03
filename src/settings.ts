@@ -723,6 +723,56 @@ export async function suggestTags(
 	return { ok: true, value: parseTagReply(result.value, maxTags) };
 }
 
+// Ask the configured gateway for a short, descriptive filename (no extension) for
+// already-converted content — used to name pasted screenshots/text. The reply is
+// stripped of thinking/code-fences and reduced to its first line; the caller is
+// responsible for final sanitization and any fallback. Never throws.
+export async function suggestFilename(
+	content: string,
+	gateway: LlmGateway | null,
+	options?: { maxContentChars?: number },
+	persist?: () => Promise<void>
+): Promise<LlmResult<string>> {
+	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+	if (!content) return { ok: false, reason: 'empty-content', detail: 'content is empty' };
+	if (isErrorBody(content)) return { ok: false, reason: 'empty-content', detail: 'content contains a conversion error' };
+
+	const maxChars = options?.maxContentChars ?? 4000;
+	const body = content.slice(0, maxChars);
+
+	const system =
+		'You name a document with a short, descriptive filename. ' +
+		'Use kebab-case, lowercase, at most about six words, no file extension. ' +
+		'If the content is a meeting (notes, invite, or screenshot of one), start the name with "meeting-" followed by the meeting topic or title. ' +
+		'Return ONLY the filename, with no path, no extension, and no other text.';
+	const user = `Document content:\n${body}`;
+
+	const result = await callChat(
+		gateway,
+		{
+			label: 'suggestFilename',
+			messages: [
+				{ role: 'system', content: system },
+				{ role: 'user', content: user },
+			],
+			maxTokens: 40,
+			temperature: 0,
+			timeoutMs: TAG_SUGGEST_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+	const reply = stripThinking(result.value)
+		.replace(/^```(?:\w+)?\s*/i, '')
+		.replace(/\s*```$/i, '')
+		.trim()
+		.split('\n')[0]
+		.trim();
+	if (reply.length === 0) return { ok: false, reason: 'no-reply' };
+	return { ok: true, value: reply };
+}
+
 const SUMMARY_TIMEOUT_MS = 180_000; // 3 minutes — reasoning models can be slow
 
 function cleanSummaryReply(raw: string): string {
