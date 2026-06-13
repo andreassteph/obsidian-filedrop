@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.1 — Fix file-group re-run conversion
+
+### Changes
+
+- Fix re-running conversion on a file group failing with "Conversion produced no output / Not a regular file" — each group member is now converted individually instead of handing markitdown the group folder
+- Ensure describe-only files (e.g. .exe) inside a group use the filename-based description path and never hit file-type sniffing
+- Add a clearer diagnostic when a non-regular-file path is passed to the Python converter, instead of a cryptic error
+
 ## 0.5.0 — Add clipboard paste and UI improvements
 
 ### Changes
