@@ -98,6 +98,7 @@ export type FileDropStatus =
 	| 'converting-llm-tags'
 	| 'converted'
 	| 'verified'
+	| 'warning'
 	| 'error';
 
 export const STATUS_LABELS: Record<FileDropStatus, string> = {
@@ -109,6 +110,7 @@ export const STATUS_LABELS: Record<FileDropStatus, string> = {
 	'converting-llm-tags': 'converting (llm description)',
 	converted: 'converted',
 	verified: 'verified',
+	warning: 'warning',
 	error: 'error',
 };
 
@@ -331,6 +333,16 @@ export type LlmResult<T> = { ok: true; value: T } | { ok: false; reason: LlmOpEr
 export function isErrorBody(content: string): boolean {
 	const head = content.trimStart();
 	return head.startsWith('> [!error]') || head.startsWith('> [!warning]');
+}
+
+// Real conversion failures vs. the "best guess from filename" fallback both
+// render as callouts; the file list distinguishes them as error vs. warning.
+export function hasErrorCallout(content: string): boolean {
+	return content.trimStart().startsWith('> [!error]');
+}
+
+export function hasWarningCallout(content: string): boolean {
+	return content.trimStart().startsWith('> [!warning]');
 }
 
 // Reasoning models emit chain-of-thought inline; strip it so it never pollutes

@@ -8,6 +8,8 @@ import {
 	MAX_RECENT_FILES,
 	PluginData,
 	VIEW_TYPE,
+	hasErrorCallout,
+	hasWarningCallout,
 	isErrorBody,
 	migrateLegacyLlmFields,
 	parsePreferredTags,
@@ -180,12 +182,13 @@ export default class FileDropPlugin extends Plugin {
 		members: { rawName: string; rawFilePath: string }[],
 		gateway: LlmGateway | null,
 		onPhase: (phase: 'markitdown' | 'llm-image') => void,
-	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean }> {
+	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
 		const { vault } = this.app;
 		const basePath: string | undefined = (vault.adapter as any).basePath;
 		const bodyParts: string[] = [];
 		const attachmentFrontmatterLines: string[] = [];
 		let anyError = false;
+		let anyWarning = false;
 
 		for (const { rawName, rawFilePath } of members) {
 			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
@@ -207,13 +210,15 @@ export default class FileDropPlugin extends Plugin {
 						);
 						const attLink = `[[${monthSlug}/${category}/${groupDirName}/${att.filename}|${att.filename}]]`;
 						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-						if (isErrorBody(att.markdown)) anyError = true;
+						if (hasErrorCallout(att.markdown)) anyError = true;
+						else if (hasWarningCallout(att.markdown)) anyWarning = true;
 					}
 					markdown = attParts.join('\n\n');
 				} else {
 					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
 				}
-				if (isErrorBody(markdown)) anyError = true;
+				if (hasErrorCallout(markdown)) anyError = true;
+				else if (hasWarningCallout(markdown)) anyWarning = true;
 			} catch (e) {
 				markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
 				anyError = true;
@@ -222,7 +227,7 @@ export default class FileDropPlugin extends Plugin {
 			bodyParts.push(`## ${rawName}\n\n${markdown}`);
 		}
 
-		return { bodyParts, attachmentFrontmatterLines, anyError };
+		return { bodyParts, attachmentFrontmatterLines, anyError, anyWarning };
 	}
 
 	private async processFileGroup(
@@ -309,6 +314,7 @@ export default class FileDropPlugin extends Plugin {
 			attachmentFrontmatterLines.push(...converted.attachmentFrontmatterLines);
 			const bodyParts = converted.bodyParts;
 			const anyError = converted.anyError;
+			const anyWarning = converted.anyWarning;
 
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
@@ -379,7 +385,7 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = anyError ? 'error' : 'converted';
+			entry.status = anyError ? 'error' : anyWarning ? 'warning' : 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
@@ -498,6 +504,7 @@ export default class FileDropPlugin extends Plugin {
 			let markdownBody: string;
 			const attachmentFrontmatterLines: string[] = [];
 			let attachmentHadError = false;
+			let attachmentHadWarning = false;
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
@@ -521,7 +528,8 @@ export default class FileDropPlugin extends Plugin {
 					if (!att.markdown) continue;
 					const attLink = `[[${monthSlug}/${category}/${attDirName}/${att.filename}|${att.filename}]]`;
 					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-					if (isErrorBody(att.markdown)) attachmentHadError = true;
+					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
+					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
 				}
 				markdownBody = bodyParts.join('\n\n');
 			} else {
@@ -571,7 +579,9 @@ export default class FileDropPlugin extends Plugin {
 			await vault.create(notePath, frontmatterLines.join('\n'));
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(markdownBody) || attachmentHadError ? 'error' : 'converted';
+			entry.status = (hasErrorCallout(markdownBody) || attachmentHadError) ? 'error'
+				: (hasWarningCallout(markdownBody) || attachmentHadWarning) ? 'warning'
+				: 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
@@ -609,6 +619,7 @@ export default class FileDropPlugin extends Plugin {
 			const isMsgFile = !isGroup && entry.filename.toLowerCase().endsWith('.msg');
 			let newBody: string;
 			let attachmentHadError = false;
+			let attachmentHadWarning = false;
 
 			if (isGroup) {
 				// filePath is `<incomingDir>/<month>/<category>/<groupDirName>`.
@@ -625,6 +636,7 @@ export default class FileDropPlugin extends Plugin {
 				);
 				newBody = converted.bodyParts.join('\n\n---\n\n');
 				attachmentHadError = converted.anyError;
+				attachmentHadWarning = converted.anyWarning;
 			} else if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 				const rawMsgName = entry.filename.replace(/\.[^.]+$/, '');
@@ -640,7 +652,8 @@ export default class FileDropPlugin extends Plugin {
 					if (!att.markdown) continue;
 					const attLink = `[[${rerunMonthSlug}/${rerunCategory}/${attDirName}/${att.filename}|${att.filename}]]`;
 					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-					if (isErrorBody(att.markdown)) attachmentHadError = true;
+					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
+					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
 				}
 				newBody = bodyParts.join('\n\n');
 			} else {
@@ -663,7 +676,9 @@ export default class FileDropPlugin extends Plugin {
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
 			entry.tags = [...mergedTags];
-			entry.status = isErrorBody(newBody) || attachmentHadError ? 'error' : 'converted';
+			entry.status = (hasErrorCallout(newBody) || attachmentHadError) ? 'error'
+				: (hasWarningCallout(newBody) || attachmentHadWarning) ? 'warning'
+				: 'converted';
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 		} catch (e) {
