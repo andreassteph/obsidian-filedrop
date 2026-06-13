@@ -777,6 +777,32 @@ export default class FileDropPlugin extends Plugin {
 		return { noteByFilePath, claimedPaths };
 	}
 
+	/** Count raw member files under each `.group` directory in the incoming folder. */
+	private groupMemberCounts(): Map<string, number> {
+		const counts = new Map<string, number>();
+		for (const f of this.app.vault.getFiles()) {
+			const m = f.path.match(/^(.+\.group)(\/|$)/);
+			if (!m) continue;
+			counts.set(m[1], (counts.get(m[1]) ?? 0) + 1);
+		}
+		return counts;
+	}
+
+	/**
+	 * Display name for a rediscovered note. Group notes (whose owned path is a
+	 * `.group` directory) get the friendly "name (group, N files)" label so they
+	 * match how freshly-dropped groups are listed; everything else uses the
+	 * source file's name.
+	 */
+	private displayFilenameFor(filePath: string, fallback: string, groupCounts: Map<string, number>): string {
+		if (filePath.endsWith('.group')) {
+			const base = (filePath.split('/').pop() ?? '').replace(/\.group$/, '');
+			const n = groupCounts.get(filePath) ?? 0;
+			return `${base} (group, ${n} file${n !== 1 ? 's' : ''})`;
+		}
+		return filePath.split('/').pop() ?? fallback;
+	}
+
 	async syncIncomingFolder(): Promise<void> {
 		const { vault, metadataCache } = this.app;
 		const incomingDir = normalizePath(this.settings.incomingDir);
@@ -784,6 +810,7 @@ export default class FileDropPlugin extends Plugin {
 
 		const { noteByFilePath } = this.buildIncomingNoteIndex(incomingDir);
 		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
+		const groupCounts = this.groupMemberCounts();
 		let changed = false;
 
 		// Re-locate tracked entries whose note was renamed since last seen.
@@ -803,7 +830,7 @@ export default class FileDropPlugin extends Plugin {
 			if (!fm || fm.verified !== false) continue;
 
 			const relPath = filePath.slice(incomingDir.length + 1);
-			const filename = relPath.split('/').pop() ?? file.name;
+			const filename = this.displayFilenameFor(filePath, file.name, groupCounts);
 			const pathParts = relPath.split('/');
 			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
 
@@ -836,6 +863,7 @@ export default class FileDropPlugin extends Plugin {
 
 		const { noteByFilePath, claimedPaths } = this.buildIncomingNoteIndex(incomingDir);
 		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
+		const groupCounts = this.groupMemberCounts();
 		let added = 0;
 
 		// Reconcile tracked entries: re-locate the note via the raw file it owns
@@ -862,7 +890,7 @@ export default class FileDropPlugin extends Plugin {
 			if (!fm) continue;
 
 			const relPath = filePath.slice(incomingDir.length + 1);
-			const filename = relPath.split('/').pop() ?? file.name;
+			const filename = this.displayFilenameFor(filePath, file.name, groupCounts);
 			const pathParts = relPath.split('/');
 			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
 
