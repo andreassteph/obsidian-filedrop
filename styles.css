@@ -633,6 +633,10 @@
   color: var(--text-muted);
 }
 
+.filedrop-status--warning {
+  color: var(--text-warning);
+}
+
 .filedrop-status--error {
   color: var(--text-error);
 }
