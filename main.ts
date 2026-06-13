@@ -167,6 +167,64 @@ export default class FileDropPlugin extends Plugin {
 		return { rawName: candidate, rawFilePath: candidatePath };
 	}
 
+	// Convert each member file of a group directory individually into a
+	// `## <name>` section. Never hand the group directory itself to markitdown:
+	// puremagic raises PureError("Not a regular file") on a directory, which
+	// markitdown does not catch, aborting the whole conversion. Shared by the
+	// initial group drop and by re-running conversion on a group entry.
+	private async convertGroupDir(
+		groupDirPath: string,
+		groupDirName: string,
+		monthSlug: string,
+		category: string,
+		members: { rawName: string; rawFilePath: string }[],
+		gateway: LlmGateway | null,
+		onPhase: (phase: 'markitdown' | 'llm-image') => void,
+	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean }> {
+		const { vault } = this.app;
+		const basePath: string | undefined = (vault.adapter as any).basePath;
+		const bodyParts: string[] = [];
+		const attachmentFrontmatterLines: string[] = [];
+		let anyError = false;
+
+		for (const { rawName, rawFilePath } of members) {
+			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
+			const isMsgFile = rawName.toLowerCase().endsWith('.msg');
+
+			let markdown: string;
+			try {
+				if (isMsgFile) {
+					const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+					const attParts: string[] = [msgResult.body];
+					for (const att of msgResult.attachments) {
+						if (!att.markdown) continue;
+						const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
+						const attBuf = Buffer.from(att.dataB64, 'base64');
+						const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+						await vault.adapter.writeBinary(attPath, ab);
+						attachmentFrontmatterLines.push(
+							`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
+						);
+						const attLink = `[[${monthSlug}/${category}/${groupDirName}/${att.filename}|${att.filename}]]`;
+						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
+						if (isErrorBody(att.markdown)) anyError = true;
+					}
+					markdown = attParts.join('\n\n');
+				} else {
+					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+				}
+				if (isErrorBody(markdown)) anyError = true;
+			} catch (e) {
+				markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
+				anyError = true;
+			}
+
+			bodyParts.push(`## ${rawName}\n\n${markdown}`);
+		}
+
+		return { bodyParts, attachmentFrontmatterLines, anyError };
+	}
+
 	private async processFileGroup(
 		files: File[],
 		groupBaseName: string,
@@ -215,14 +273,19 @@ export default class FileDropPlugin extends Plugin {
 		this.getActiveView()?.renderFileList();
 
 		try {
-			const basePath: string | undefined = (vault.adapter as any).basePath;
 			const attachmentFrontmatterLines: string[] = [];
-			const bodyParts: string[] = [];
-			let anyError = false;
 
 			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 
+			const onPhase = (phase: 'markitdown' | 'llm-image') => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+				this.getActiveView()?.renderFileList();
+			};
+
+			// Write every dropped file into the group dir first, then convert each
+			// individually via convertGroupDir (never the directory itself).
+			const members: { rawName: string; rawFilePath: string }[] = [];
 			for (const file of files) {
 				const buffer = await file.arrayBuffer();
 				let rawName = file.name;
@@ -237,48 +300,15 @@ export default class FileDropPlugin extends Plugin {
 				attachmentFrontmatterLines.push(
 					`  - "[[${monthSlug}/${category}/${groupDirName}/${rawName}]]"`
 				);
-
-				const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-				const onPhase = (phase: 'markitdown' | 'llm-image') => {
-					entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
-					this.getActiveView()?.renderFileList();
-				};
-
-				const isMsgFile =
-					rawName.toLowerCase().endsWith('.msg') ||
-					file.type === 'application/vnd.ms-outlook' ||
-					file.type === 'application/x-msg';
-
-				let markdown: string;
-				try {
-					if (isMsgFile) {
-						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
-						const attParts: string[] = [msgResult.body];
-						for (const att of msgResult.attachments) {
-							if (!att.markdown) continue;
-							const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
-							const attBuf = Buffer.from(att.dataB64, 'base64');
-							const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-							await vault.adapter.writeBinary(attPath, ab);
-							attachmentFrontmatterLines.push(
-								`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
-							);
-							const attLink = `[[${monthSlug}/${category}/${groupDirName}/${att.filename}|${att.filename}]]`;
-						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-							if (isErrorBody(att.markdown)) anyError = true;
-						}
-						markdown = attParts.join('\n\n');
-					} else {
-						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
-					}
-					if (isErrorBody(markdown)) anyError = true;
-				} catch (e) {
-					markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
-					anyError = true;
-				}
-
-				bodyParts.push(`## ${rawName}\n\n${markdown}`);
+				members.push({ rawName, rawFilePath });
 			}
+
+			const converted = await this.convertGroupDir(
+				groupDirPath, groupDirName, monthSlug, category, members, gateway, onPhase,
+			);
+			attachmentFrontmatterLines.push(...converted.attachmentFrontmatterLines);
+			const bodyParts = converted.bodyParts;
+			const anyError = converted.anyError;
 
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
@@ -570,11 +600,32 @@ export default class FileDropPlugin extends Plugin {
 				this.getActiveView()?.renderFileList();
 			};
 
-			const isMsgFile = entry.filename.toLowerCase().endsWith('.msg');
+			// Group entries store the `.group` directory as filePath. Converting
+			// the directory would hand it to puremagic and fail with
+			// "Not a regular file" — instead convert each member file individually.
+			const dirStat = await vault.adapter.stat(entry.filePath);
+			const isGroup = entry.filePath.endsWith('.group') && dirStat?.type === 'folder';
+
+			const isMsgFile = !isGroup && entry.filename.toLowerCase().endsWith('.msg');
 			let newBody: string;
 			let attachmentHadError = false;
 
-			if (isMsgFile) {
+			if (isGroup) {
+				// filePath is `<incomingDir>/<month>/<category>/<groupDirName>`.
+				const parts = entry.filePath.split('/');
+				const groupDirName = parts[parts.length - 1];
+				const category = parts[parts.length - 2] ?? '';
+				const monthSlug = parts[parts.length - 3] ?? '';
+				const listing = await vault.adapter.list(entry.filePath);
+				const members = listing.files
+					.filter((p) => !p.toLowerCase().endsWith('.md'))
+					.map((p) => ({ rawName: p.split('/').pop() as string, rawFilePath: p }));
+				const converted = await this.convertGroupDir(
+					entry.filePath, groupDirName, monthSlug, category, members, gateway, onPhase,
+				);
+				newBody = converted.bodyParts.join('\n\n---\n\n');
+				attachmentHadError = converted.anyError;
+			} else if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
 				const rawMsgName = entry.filename.replace(/\.[^.]+$/, '');
 				const attDirName = `${rawMsgName}.attachments`;

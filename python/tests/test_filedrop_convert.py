@@ -13,6 +13,15 @@ BASE_ENV = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _assume_regular_file():
+    """convert() now guards on os.path.isfile before touching markitdown. These
+    unit tests mock the converter and pass synthetic paths, so treat them as
+    regular files; the guard itself is covered by test_convert_skips_directory."""
+    with patch.object(filedrop_convert.os.path, "isfile", return_value=True):
+        yield
+
+
 def test_openai_base_url_none_when_url_blank():
     with patch.object(filedrop_convert, "OpenAI") as openai, \
             patch.object(filedrop_convert, "MarkItDown"):
@@ -185,6 +194,19 @@ def test_convert_pptx_returns_empty_when_both_steps_fail():
         markitdown.return_value.convert.side_effect = Exception("corrupt deck")
         result = filedrop_convert.convert("/tmp/deck.pptx", dict(BASE_ENV))
     assert result == ""
+
+
+def test_convert_skips_directory():
+    """A directory path (e.g. a `.group` folder) returns "" without invoking
+    markitdown, so puremagic can't abort with "Not a regular file"."""
+    with patch.object(filedrop_convert.os.path, "isfile", return_value=False), \
+            patch.object(filedrop_convert.os.path, "isdir", return_value=True), \
+            patch.object(filedrop_convert, "MarkItDown") as markitdown, \
+            patch.object(filedrop_convert, "build_converter") as build_converter:
+        result = filedrop_convert.convert("/tmp/some.group", dict(BASE_ENV))
+    assert result == ""
+    build_converter.assert_not_called()
+    markitdown.return_value.convert.assert_not_called()
 
 
 def test_convert_without_llm_swallows_errors():

@@ -321,6 +321,13 @@ def _convert_file(path, llm_md, env):
 
 
 def convert_msg(path, env):
+    # See filedrop_convert.convert(): guard against a non-regular-file path
+    # (e.g. a directory) so puremagic can't abort with "Not a regular file".
+    if not os.path.isfile(path):
+        kind = "a directory" if os.path.isdir(path) else "missing"
+        print(f"[filedrop] input path is {kind}, not a regular file: {path}", file=sys.stderr)
+        return {"body": "", "attachments": [], "warning": None}
+
     llm_md = _build_llm_markitdown(env)
     body = _convert_file(path, llm_md, env)
 

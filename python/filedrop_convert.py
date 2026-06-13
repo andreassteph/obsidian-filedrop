@@ -143,6 +143,15 @@ def _emit_phase(phase):
 
 
 def convert(path, env):
+    # markitdown hands the path to puremagic, which raises an uncaught
+    # PureError("Not a regular file") for anything that isn't a regular file
+    # (e.g. a directory), aborting the whole conversion with a cryptic message.
+    # Guard up front so the failure is legible instead.
+    if not os.path.isfile(path):
+        kind = "a directory" if os.path.isdir(path) else "missing"
+        print(f"[filedrop] input path is {kind}, not a regular file: {path}", file=sys.stderr)
+        return ""
+
     is_pdf = path.lower().endswith(".pdf")
 
     # Try markitdown with LLM support first. build_converter passes llm_client
