@@ -198,17 +198,26 @@ export default class FileDropPlugin extends Plugin {
 			try {
 				if (isMsgFile) {
 					const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+					// Keep each .msg's attachments in their own `<file.msg>.attachments/`
+					// subfolder rather than flat in the group dir. Because
+					// vault.adapter.list() is non-recursive, this keeps them out of
+					// the member listing on rerun (no duplicate sections) and avoids
+					// filename collisions between attachments of different emails.
+					const attDirName = `${rawName}.attachments`;
+					if (msgResult.attachments.length > 0) {
+						await this.ensureDir(normalizePath(`${groupDirPath}/${attDirName}`));
+					}
 					const attParts: string[] = [msgResult.body];
 					for (const att of msgResult.attachments) {
 						if (!att.markdown) continue;
-						const attPath = normalizePath(`${groupDirPath}/${att.filename}`);
+						const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
 						const attBuf = Buffer.from(att.dataB64, 'base64');
 						const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
 						await vault.adapter.writeBinary(attPath, ab);
 						attachmentFrontmatterLines.push(
-							`  - "[[${monthSlug}/${category}/${groupDirName}/${att.filename}]]"`
+							`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
 						);
-						const attLink = `[[${monthSlug}/${category}/${groupDirName}/${att.filename}|${att.filename}]]`;
+						const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
 						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
 						if (hasErrorCallout(att.markdown)) anyError = true;
 						else if (hasWarningCallout(att.markdown)) anyWarning = true;
@@ -639,14 +648,32 @@ export default class FileDropPlugin extends Plugin {
 				attachmentHadWarning = converted.anyWarning;
 			} else if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
-				const rawMsgName = entry.filename.replace(/\.[^.]+$/, '');
-				const attDirName = `${rawMsgName}.attachments`;
+				// Match the initial-drop layout: attachments live next to the .msg
+				// in `<file.msg>.attachments/` (full name, extension included). The
+				// note's frontmatter `attachments:` list already points there.
+				const attDirName = `${entry.filename}.attachments`;
 				const incomingPrefix = normalizePath(this.settings.incomingDir) + '/';
 				const rel = entry.filePath.startsWith(incomingPrefix)
 					? entry.filePath.slice(incomingPrefix.length)
 					: entry.filePath;
 				const rerunMonthSlug = rel.split('/')[0] ?? '';
 				const rerunCategory = entry.category;
+
+				// Re-write the extracted attachment binaries next to the .msg so a
+				// rerun is self-healing (the dir may have been deleted). The on-disk
+				// dir is the real sibling of the .msg; the wikilink omits the
+				// incoming prefix, mirroring the initial drop.
+				if (msgResult.attachments.length > 0) {
+					const attDirPath = normalizePath(`${entry.filePath.split('/').slice(0, -1).join('/')}/${attDirName}`);
+					await this.ensureDir(attDirPath);
+					for (const att of msgResult.attachments) {
+						const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
+						const attBuf = Buffer.from(att.dataB64, 'base64');
+						const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
+						await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
+					}
+				}
+
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
 					if (!att.markdown) continue;
