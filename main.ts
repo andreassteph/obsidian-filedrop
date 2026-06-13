@@ -716,28 +716,94 @@ export default class FileDropPlugin extends Plugin {
 		}
 	}
 
+	/**
+	 * Parse all wikilink targets (`[[target|alias]]` / `[[target#heading]]`) out
+	 * of a frontmatter value that may be a single string or a list of strings.
+	 */
+	private parseWikilinkTargets(value: unknown): string[] {
+		const targets: string[] = [];
+		const collect = (s: string): void => {
+			const re = /\[\[(.+?)\]\]/g;
+			let m: RegExpExecArray | null;
+			while ((m = re.exec(s)) !== null) {
+				const target = m[1].split('|')[0].split('#')[0].trim();
+				if (target) targets.push(target);
+			}
+		};
+		if (typeof value === 'string') collect(value);
+		else if (Array.isArray(value)) {
+			for (const item of value) if (typeof item === 'string') collect(item);
+		}
+		return targets;
+	}
+
+	/**
+	 * Index filedrop notes by the raw source files they own.
+	 *
+	 * A note's filename is not a stable identity — users rename notes freely.
+	 * The `original-file` and `attachments` frontmatter links point at the raw
+	 * source files, which stay put across note renames, so we key off those
+	 * instead. This lets us re-locate a tracked note after it has been renamed
+	 * and recognise raw files / attachments that a note already claims (so they
+	 * are not mistaken for new drops).
+	 */
+	private buildIncomingNoteIndex(incomingDir: string): {
+		noteByFilePath: Map<string, TFile>;
+		claimedPaths: Set<string>;
+	} {
+		const { vault, metadataCache } = this.app;
+		const noteByFilePath = new Map<string, TFile>();
+		const claimedPaths = new Set<string>();
+
+		const mdFiles = vault.getMarkdownFiles().filter((f) =>
+			f.path.startsWith(incomingDir + '/')
+		);
+		for (const file of mdFiles) {
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm) continue;
+
+			const originalTargets = this.parseWikilinkTargets(fm['original-file']);
+			if (originalTargets.length > 0) {
+				const filePath = normalizePath(`${incomingDir}/${originalTargets[0]}`);
+				// First note wins so an existing tracked note is not shadowed.
+				if (!noteByFilePath.has(filePath)) noteByFilePath.set(filePath, file);
+				claimedPaths.add(filePath);
+			}
+			for (const att of this.parseWikilinkTargets(fm.attachments)) {
+				claimedPaths.add(normalizePath(`${incomingDir}/${att}`));
+			}
+		}
+
+		return { noteByFilePath, claimedPaths };
+	}
+
 	async syncIncomingFolder(): Promise<void> {
 		const { vault, metadataCache } = this.app;
 		const incomingDir = normalizePath(this.settings.incomingDir);
 		if (!(await vault.adapter.exists(incomingDir))) return;
 
-		const mdFiles = vault.getMarkdownFiles().filter((f) =>
-			f.path.startsWith(incomingDir + '/')
-		);
-
-		const existingPaths = new Set(this.recentFiles.map((e) => e.notePath));
+		const { noteByFilePath } = this.buildIncomingNoteIndex(incomingDir);
+		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
 		let changed = false;
 
-		for (const file of mdFiles) {
-			if (existingPaths.has(file.path)) continue;
+		// Re-locate tracked entries whose note was renamed since last seen.
+		for (const entry of this.recentFiles) {
+			const note = noteByFilePath.get(entry.filePath);
+			if (note && note.path !== entry.notePath) {
+				entry.notePath = note.path;
+				changed = true;
+			}
+		}
+
+		// Pick up untracked unverified notes, keyed by the raw file they own so
+		// a renamed note is not re-added as a duplicate.
+		for (const [filePath, file] of noteByFilePath) {
+			if (trackedFilePaths.has(filePath)) continue;
 			const fm = metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm || fm.verified !== false) continue;
 
-			const originalFileLink: string = fm['original-file'] ?? '';
-			const linkMatch = originalFileLink.match(/\[\[(.+?)\]\]/);
-			const relPath = linkMatch ? linkMatch[1] : '';
-			const filePath = relPath ? normalizePath(`${incomingDir}/${relPath}`) : '';
-			const filename = relPath ? (relPath.split('/').pop() ?? file.name) : file.name;
+			const relPath = filePath.slice(incomingDir.length + 1);
+			const filename = relPath.split('/').pop() ?? file.name;
 			const pathParts = relPath.split('/');
 			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
 
@@ -750,6 +816,7 @@ export default class FileDropPlugin extends Plugin {
 				droppedAt: file.stat.ctime,
 				verified: false,
 			});
+			trackedFilePaths.add(filePath);
 			changed = true;
 		}
 
@@ -767,13 +834,16 @@ export default class FileDropPlugin extends Plugin {
 			return;
 		}
 
-		const trackedNotePaths = new Set(this.recentFiles.map((e) => e.notePath));
+		const { noteByFilePath, claimedPaths } = this.buildIncomingNoteIndex(incomingDir);
 		const trackedFilePaths = new Set(this.recentFiles.map((e) => e.filePath));
 		let added = 0;
 
-		// Refresh verified/processed for already-tracked entries
+		// Reconcile tracked entries: re-locate the note via the raw file it owns
+		// (handles notes renamed since last seen) and refresh verified/processed.
 		for (const entry of this.recentFiles) {
-			const file = vault.getAbstractFileByPath(entry.notePath);
+			const note = noteByFilePath.get(entry.filePath);
+			if (note && note.path !== entry.notePath) entry.notePath = note.path;
+			const file = note ?? vault.getAbstractFileByPath(entry.notePath);
 			if (!(file instanceof TFile)) continue;
 			const fm = metadataCache.getFileCache(file)?.frontmatter;
 			if (!fm) continue;
@@ -782,19 +852,17 @@ export default class FileDropPlugin extends Plugin {
 			if (entry.verified && entry.status !== 'verified') entry.status = 'verified';
 		}
 
-		// Pick up untracked .md filedrop notes (verified or not)
-		const mdFiles = vault.getMarkdownFiles().filter((f) =>
-			f.path.startsWith(incomingDir + '/')
-		);
-		for (const file of mdFiles) {
-			if (trackedNotePaths.has(file.path)) continue;
+		// Pick up untracked filedrop notes (verified or not), keyed by the raw
+		// file they own rather than the note path, so a renamed note is not
+		// re-added as a duplicate.
+		const trackedNotePaths = new Set(this.recentFiles.map((e) => e.notePath));
+		for (const [filePath, file] of noteByFilePath) {
+			if (trackedFilePaths.has(filePath)) continue;
 			const fm = metadataCache.getFileCache(file)?.frontmatter;
-			if (!fm || !fm['original-file']) continue;
+			if (!fm) continue;
 
-			const linkMatch = String(fm['original-file']).match(/\[\[(.+?)\]\]/);
-			const relPath = linkMatch ? linkMatch[1] : '';
-			const filePath = relPath ? normalizePath(`${incomingDir}/${relPath}`) : '';
-			const filename = relPath ? (relPath.split('/').pop() ?? file.name) : file.name;
+			const relPath = filePath.slice(incomingDir.length + 1);
+			const filename = relPath.split('/').pop() ?? file.name;
 			const pathParts = relPath.split('/');
 			const category = pathParts.length >= 2 ? pathParts[1] : 'default';
 
@@ -812,12 +880,15 @@ export default class FileDropPlugin extends Plugin {
 			added++;
 		}
 
-		// Find raw files without a tracked .md — create stub + add to filelist
+		// Find raw files without a tracked .md — create stub + add to filelist.
+		// Skip files a note already claims (as original-file or attachment),
+		// even if they live outside the .attachments/.group conventions.
 		const rawFiles = vault.getFiles().filter((f) =>
 			f.path.startsWith(incomingDir + '/') &&
 			!f.path.endsWith('.md') &&
 			!f.path.includes('.attachments/') &&
-			!f.path.includes('.group/')
+			!f.path.includes('.group/') &&
+			!claimedPaths.has(f.path)
 		);
 		for (const file of rawFiles) {
 			if (trackedFilePaths.has(file.path)) continue;
