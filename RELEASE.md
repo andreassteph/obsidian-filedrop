@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.2 — Reliability fixes for rediscovery, .msg attachments, and conversion status
+
+### Changes
+
+- Make filelist rediscovery robust to note renames, and pick up rediscovered groups with their friendly label
+- Fix .msg attachments being dropped or duplicated on re-run
+- Show a "warning" status (not "error") for describe-fallback conversions
+
 ## 0.5.1 — Fix file-group re-run conversion
 
 ### Changes
