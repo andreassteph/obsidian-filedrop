@@ -10,7 +10,7 @@ export class FileDropView extends ItemView {
 	private plugin: FileDropPlugin;
 	private fileListEl: HTMLElement | null = null;
 	private selectedCategory: string;
-	private selectedGatewayId: string | null = null;
+	selectedGatewayId: string | null = null;
 	private modelSelectEl: HTMLSelectElement | null = null;
 	private hiddenNotePaths = new Set<string>();
 	private showVerified = false;
@@ -203,6 +203,23 @@ export class FileDropView extends ItemView {
 				updateBtn.setText('↻ Update filelist');
 			}
 		});
+
+		if (this.plugin.settings.externalFolder.trim()) {
+			const scanBtn = updateRow.createEl('button', {
+				cls: 'filedrop-update-btn',
+				text: '⇄ Scan external',
+			});
+			scanBtn.addEventListener('click', async () => {
+				scanBtn.disabled = true;
+				scanBtn.setText('Scanning…');
+				try {
+					await this.plugin.scanExternalFolder(this.selectedGatewayId);
+				} finally {
+					scanBtn.disabled = false;
+					scanBtn.setText('⇄ Scan external');
+				}
+			});
+		}
 
 		const showVerifiedLabel = updateRow.createEl('label', { cls: 'filedrop-showverified-label' });
 		const showVerifiedCheckbox = showVerifiedLabel.createEl('input', { cls: 'filedrop-showverified-checkbox' });
@@ -598,7 +615,11 @@ export class FileDropView extends ItemView {
 
 	private async removeEntry(index: number): Promise<void> {
 		const entry = this.plugin.recentFiles[index];
-		try { await this.app.vault.adapter.remove(entry.filePath); } catch { /* best-effort */ }
+		// External entries reference a raw file outside the vault that we don't
+		// own — only remove the generated note, never the external source.
+		if (!entry.external) {
+			try { await this.app.vault.adapter.remove(entry.filePath); } catch { /* best-effort */ }
+		}
 		try {
 			const noteFile = this.app.vault.getAbstractFileByPath(entry.notePath);
 			if (noteFile instanceof TFile) await this.app.vault.delete(noteFile);

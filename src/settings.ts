@@ -56,6 +56,8 @@ export interface ReferenceConditionGroup {
 
 export interface FileDropSettings {
 	incomingDir: string;
+	externalFolder: string;          // absolute OS path, '' = disabled
+	externalGroupFileLimit: number;  // max files per top-level folder group
 	categories: string[];
 	defaultTags: string[];
 	preferredTags: string;
@@ -135,6 +137,10 @@ export interface DroppedFile {
 	verified?: boolean;
 	processed?: boolean;
 	status?: FileDropStatus;
+	// External linked-folder entries: raw file lives outside the vault.
+	external?: boolean;
+	sourcePath?: string;      // absolute external path (file or top-level folder)
+	sourceSignature?: string; // size+mtime fingerprint for change detection
 }
 
 export interface PluginData {
@@ -158,6 +164,8 @@ export const DEFAULT_TODO_PROMPT = [
 
 export const DEFAULT_SETTINGS: FileDropSettings = {
 	incomingDir: 'incoming',
+	externalFolder: '',
+	externalGroupFileLimit: 10,
 	categories: ['default', 'mails', 'teams'],
 	defaultTags: [],
 	preferredTags: '',
