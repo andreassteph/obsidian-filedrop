@@ -119,21 +119,56 @@ function unsupportedFormatDetail(message: string, fileName?: string): string | n
 	return fileName ? `${fileName}: ${detail}` : detail;
 }
 
+// On a timeout the subprocess is SIGTERM'd mid-stream, so whatever it printed
+// before the kill is all we get — but that "last output" is exactly what tells
+// us *where* it hung (which phase, what markitdown logged, whether any markdown
+// was produced). Capture and surface it instead of a bare one-liner, since long
+// budgets timing out is suspicious and needs diagnosing.
+function timeoutDetail(stderr: string, stdout: string, timeoutMs?: number): string {
+	const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
+	// `[filedrop:phase] <phase>` is our live progress marker — the last one tells
+	// us which stage the process was in when it was killed (markitdown vs
+	// llm-image), the single most useful signal for a timeout.
+	let lastPhase: string | null = null;
+	for (const line of lines) {
+		const m = line.match(/^\[filedrop:phase\]\s+(\S+)/);
+		if (m) lastPhase = m[1];
+	}
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+	const otherLines = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+
+	const budget = timeoutMs ? ` after ${Math.round(timeoutMs / 1000)}s` : '';
+	const parts = [`The conversion process timed out before finishing${budget}.`];
+	if (lastPhase) parts.push(`Last phase reached: ${lastPhase}`);
+	if (diagnostics.length) parts.push(`Diagnostics:\n${diagnostics.join('\n')}`);
+	if (otherLines.length) {
+		// Bound the captured tail so a runaway process can't dump megabytes into
+		// the note (line cap + byte cap).
+		let tail = otherLines.slice(-15).join('\n');
+		if (tail.length > 4000) tail = '…' + tail.slice(-4000);
+		parts.push(`Last output:\n${tail}`);
+	}
+	const produced = (stdout || '').trim().length;
+	parts.push(produced
+		? `Produced ${produced} characters of partial output before being killed.`
+		: 'No output was produced before being killed.');
+	return parts.join('\n\n');
+}
+
 // execFile sets error.message to "Command failed: <cmd>\n<stderr>". Because the
 // plugin invokes Python as `-c <inlined source>`, <cmd> embeds the entire
 // script, which is useless noise in a note. Surface the subprocess's stderr
 // instead — the [filedrop] diagnostics plus the final traceback line, which is
 // the real exception — and fall back to a short reason when there is no stderr
-// (e.g. a timeout or a missing Python interpreter), never the raw command.
+// (e.g. a missing Python interpreter), never the raw command.
 function subprocessErrorDetail(
 	error: SubprocessError,
-	stderr: string
+	stderr: string,
+	stdout = '',
+	timeoutMs?: number,
 ): string {
-	// A timeout-killed Python process produces a SIGTERM mid-stream — any
-	// stderr from before the kill is partial and misleading, so report the
-	// timeout directly instead of surfacing it.
 	if (error.reason === 'timeout' || error.killed) {
-		return 'The conversion process timed out before finishing.';
+		return timeoutDetail(stderr, stdout, timeoutMs);
 	}
 	if (error.reason === 'maxBuffer') {
 		return 'The conversion process produced more output than the buffer could hold.';
@@ -149,7 +184,9 @@ function subprocessErrorDetail(
 	if (parts.length) return parts.join('\n');
 
 	if (error.signal === 'SIGTERM') {
-		return 'The conversion process timed out before finishing.';
+		// execFile timeouts surface only as SIGTERM (no error.reason) — treat them
+		// the same as the runWithPhases timeout path.
+		return timeoutDetail(stderr, stdout, timeoutMs);
 	}
 	if (error.code === 'ENOENT') {
 		return 'Python could not be started — check the Python command in FileDrop settings.';
@@ -259,7 +296,7 @@ export async function runMarkitdown(
 						}
 						new Notice('FileDrop: LLM conversion failed — see note body for details.');
 						const gwContext = `Gateway: ${gateway.name}\nURL: ${gateway.baseUrl}\nModel: ${gateway.model}\n\n`;
-						resolve(conversionErrorBody('LLM conversion failed', gwContext + subprocessErrorDetail(error, stderr)));
+						resolve(conversionErrorBody('LLM conversion failed', gwContext + subprocessErrorDetail(error, stderr, stdout, LLM_TIMEOUT_MS)));
 						return;
 					}
 					if (!stdout.trim()) {
@@ -296,7 +333,7 @@ export async function runMarkitdown(
 						return;
 					}
 					new Notice('FileDrop: markitdown failed — see note body for details.');
-					resolve(conversionErrorBody('markitdown conversion failed', subprocessErrorDetail(error, stderr)));
+					resolve(conversionErrorBody('markitdown conversion failed', subprocessErrorDetail(error, stderr, stdout, MARKITDOWN_TIMEOUT_MS)));
 					return;
 				}
 				if (!stdout.trim()) {
@@ -389,7 +426,7 @@ export async function runMsgConversion(
 					}
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({
-						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr)),
+						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr, stdout, timeout)),
 						attachments: [],
 					});
 					return;
