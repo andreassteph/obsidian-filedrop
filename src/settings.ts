@@ -60,6 +60,8 @@ export interface FileDropSettings {
 	defaultTags: string[];
 	preferredTags: string;
 	describeExtensions: string;
+	groupConcurrency: number;
+	largeFileWarnMb: number;
 	llmGateways: LlmGateway[];
 	pythonCommand: string;
 	referenceGroups: ReferenceConditionGroup[];
@@ -160,6 +162,8 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	defaultTags: [],
 	preferredTags: '',
 	describeExtensions: '.exe, .dll, .ocx, .scr, .acm, .olb, .fon, .vxd, .386, .cpl, .com, .drv, .pif, .qts, .qtx, .sys, .vbx, .ax, .bin, .so, .dylib, .o, .a, .lib, .out',
+	groupConcurrency: 3,
+	largeFileWarnMb: 25,
 	llmGateways: [],
 	pythonCommand: 'python3',
 	referenceGroups: [],

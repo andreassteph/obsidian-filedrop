@@ -85,6 +85,36 @@ export class FileDropSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Group conversion concurrency')
+			.setDesc('How many files in a dropped group are converted in parallel. Higher is faster but uses more CPU and memory (peak memory ≈ this × per-file output). Set to 1 for the previous strictly-sequential behavior.')
+			.addText((text) =>
+				text
+					.setValue(String(this.plugin.settings.groupConcurrency))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!isNaN(n) && n > 0) {
+							this.plugin.settings.groupConcurrency = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Large file warning (MB)')
+			.setDesc('Show a non-blocking notice when a dropped file exceeds this size, since conversion may be slow. Set to 0 to disable.')
+			.addText((text) =>
+				text
+					.setValue(String(this.plugin.settings.largeFileWarnMb))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!isNaN(n) && n >= 0) {
+							this.plugin.settings.largeFileWarnMb = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
 			.setName('Preferred tags')
 			.setDesc('One per line as "tag: description". After conversion the LLM is asked to prefer these tags.')
 			.addTextArea((text) =>

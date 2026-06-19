@@ -5,10 +5,15 @@ each piece via markitdown.  Outputs a single JSON object to stdout:
   {
     "body":        "<markitdown output of the .msg itself>",
     "attachments": [
-      { "filename": "doc.pdf", "data_b64": "<base64>", "markdown": "..." },
+      { "filename": "doc.pdf", "temp_path": "/tmp/.../doc.pdf", "markdown": "..." },
       ...
     ]
   }
+
+Attachment bytes are written to a temp directory and referenced by absolute
+`temp_path` rather than base64-encoded onto stdout; the TS side reads each file
+into the vault and deletes it. This avoids the ~33% base64 inflation (and the
+extra in-memory copy) of shipping bytes through stdout.
 
 LLM-gateway config is read from environment variables (same keys as
 filedrop_convert.py).  Called as: python -c <inlined-source> <msg_path>
@@ -27,10 +32,23 @@ import tempfile
 
 from markitdown import MarkItDown
 
-try:
-    from openai import OpenAI
-except ImportError:  # plain .msg conversion still works without the LLM stack
-    OpenAI = None
+# Imported lazily in _make_client so a no-LLM .msg conversion (the common case
+# without a gateway) doesn't pay the OpenAI SDK import cost. Tests patch this
+# symbol, so it must exist at module scope.
+OpenAI = None
+
+
+def _openai_available():
+    """Whether the OpenAI SDK can be imported, without keeping it loaded on the
+    no-LLM path. Checked last in _llm_configured so a no-gateway .msg conversion
+    short-circuits (on the missing env vars) before paying the import cost."""
+    if OpenAI is not None:
+        return True
+    try:
+        import openai  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 # Strip chain-of-thought blocks that reasoning models emit before their answer.
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
@@ -76,10 +94,10 @@ def _install_thinking_filter(client):
 
 def _llm_configured(env):
     return bool(
-        OpenAI is not None
-        and env.get("FILEDROP_LLM_URL")
+        env.get("FILEDROP_LLM_URL")
         and env.get("FILEDROP_LLM_KEY")
         and env.get("FILEDROP_LLM_MODEL")
+        and _openai_available()
     )
 
 
@@ -106,6 +124,10 @@ def _make_client(env, **kwargs):
     # because the Siemens gateway requires it; other providers ignore it.
     # max_retries=0: the SDK's default 2 retries silently triple the wait when
     # a gateway hangs.
+    global OpenAI
+    if OpenAI is None:
+        from openai import OpenAI as _OpenAI
+        OpenAI = _OpenAI
     key = env["FILEDROP_LLM_KEY"]
     kwargs.setdefault("timeout", _llm_timeout(env))
     kwargs.setdefault("max_retries", 0)
@@ -155,13 +177,18 @@ def _build_llm_markitdown(env):
     return MarkItDown(**kwargs)
 
 
-def _convert_without_llm(path):
+def _convert_without_llm(path, plain_md=None):
     """Re-run markitdown with no LLM client so a file's extractable text is still
     captured when the LLM-enhanced step fails. Returns the plain text, or "" if
     even this fails — never raises, so a failure here can't crash the process and
-    dump the whole invocation into the note."""
+    dump the whole invocation into the note.
+
+    `plain_md` is an optional pre-built no-LLM MarkItDown reused across the body
+    and every attachment of one .msg, so we don't re-register converters per file.
+    """
     try:
-        result = MarkItDown().convert(path).text_content
+        converter = plain_md if plain_md is not None else MarkItDown()
+        result = converter.convert(path).text_content
         if result and result.strip():
             return result
     except Exception as exc:
@@ -259,7 +286,7 @@ def _unsupported_detail(exc):
     return msg or "This file type is not supported by markitdown."
 
 
-def _convert_file(path, llm_md, env):
+def _convert_file(path, llm_md, env, plain_md=None):
     """Convert one file (the .msg body or an attachment) to markdown.
 
     Mirrors filedrop_convert.convert(): try markitdown-with-LLM first so
@@ -278,7 +305,7 @@ def _convert_file(path, llm_md, env):
 
     if llm_md is None:
         _emit_phase("markitdown")
-        result = _convert_without_llm(path)
+        result = _convert_without_llm(path, plain_md)
         if result:
             return result
         return _error_callout(
@@ -300,7 +327,7 @@ def _convert_file(path, llm_md, env):
             return _error_callout("Unsupported file format", unsupported)
         print(f"[filedrop] markitdown LLM step failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
-            fallback = _convert_without_llm(path)
+            fallback = _convert_without_llm(path, plain_md)
             if fallback:
                 return fallback
             return _error_callout(
@@ -329,7 +356,10 @@ def convert_msg(path, env):
         return {"body": "", "attachments": [], "warning": None}
 
     llm_md = _build_llm_markitdown(env)
-    body = _convert_file(path, llm_md, env)
+    # One no-LLM MarkItDown reused for the body and every attachment that needs
+    # the plain fallback, instead of constructing a fresh instance per file.
+    plain_md = MarkItDown()
+    body = _convert_file(path, llm_md, env, plain_md)
 
     attachments = []
     warning = None
@@ -345,26 +375,28 @@ def convert_msg(path, env):
 
     try:
         msg = extract_msg.Message(path)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            for att in msg.attachments or []:
-                filename = (
-                    getattr(att, "longFilename", None)
-                    or getattr(att, "shortFilename", None)
-                )
-                data = getattr(att, "data", None)
-                if not filename or not data:
-                    continue
+        # mkdtemp (not TemporaryDirectory) so the extracted files survive process
+        # exit: the TS side reads each temp_path into the vault, then deletes it.
+        tmpdir = tempfile.mkdtemp(prefix="filedrop_msg_")
+        for att in msg.attachments or []:
+            filename = (
+                getattr(att, "longFilename", None)
+                or getattr(att, "shortFilename", None)
+            )
+            data = getattr(att, "data", None)
+            if not filename or not data:
+                continue
 
-                att_path = os.path.join(tmpdir, filename)
-                with open(att_path, "wb") as fh:
-                    fh.write(data)
+            att_path = os.path.join(tmpdir, os.path.basename(filename))
+            with open(att_path, "wb") as fh:
+                fh.write(data)
 
-                att_md = _convert_file(att_path, llm_md, env)
-                attachments.append({
-                    "filename": filename,
-                    "data_b64": base64.b64encode(data).decode("ascii"),
-                    "markdown": att_md,
-                })
+            att_md = _convert_file(att_path, llm_md, env, plain_md)
+            attachments.append({
+                "filename": filename,
+                "temp_path": att_path,
+                "markdown": att_md,
+            })
     except Exception as exc:
         warning = f"Attachment extraction failed: {type(exc).__name__}: {exc}"
 

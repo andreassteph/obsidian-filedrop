@@ -1,3 +1,4 @@
+import sys
 import types
 from unittest.mock import MagicMock, patch
 
@@ -192,6 +193,35 @@ def test_temperature_kwargs(value, expected):
     if value is not None:
         env["FILEDROP_LLM_TEMPERATURE"] = value
     assert filedrop_msg._temperature_kwargs(env) == expected
+
+
+def test_convert_msg_writes_attachment_to_temp_file(tmp_path):
+    """Attachments are handed across as temp files (temp_path), not base64 bytes
+    on stdout. The temp file must hold the exact attachment bytes."""
+    import os
+    import shutil
+
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    att = types.SimpleNamespace(longFilename="doc.txt", shortFilename=None, data=b"hello bytes")
+    fake_extract_msg = types.SimpleNamespace(Message=lambda path: types.SimpleNamespace(attachments=[att]))
+
+    with patch.object(filedrop_msg, "MarkItDown") as markitdown, \
+            patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        markitdown.return_value.convert.return_value.text_content = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})  # empty env → no gateway
+
+    atts = result["attachments"]
+    assert len(atts) == 1
+    a = atts[0]
+    assert a["filename"] == "doc.txt"
+    assert "data_b64" not in a
+    assert os.path.isfile(a["temp_path"])
+    with open(a["temp_path"], "rb") as fh:
+        assert fh.read() == b"hello bytes"
+
+    shutil.rmtree(os.path.dirname(a["temp_path"]), ignore_errors=True)
 
 
 def test_convert_pdf_pages_skipped_when_vision_disabled():

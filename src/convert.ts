@@ -323,7 +323,10 @@ export async function runMarkitdown(
 		execFile(
 			'markitdown',
 			[absolutePath],
-			{ timeout: MARKITDOWN_TIMEOUT_MS, env: { ...process.env, PYTHONUTF8: '1' } },
+			// 200 MB matches the LLM path. execFile defaults maxBuffer to 1 MB, which
+			// truncates/kills large conversions (e.g. a big spreadsheet or docx) on
+			// this CLI fallback path; give it the same headroom as the Python path.
+			{ timeout: MARKITDOWN_TIMEOUT_MS, maxBuffer: 200 * 1024 * 1024, env: { ...process.env, PYTHONUTF8: '1' } },
 			(error: Error | null, stdout: string, stderr: string) => {
 				if (error) {
 					const unsupported = unsupportedFormatDetail(error.message, path.basename(absolutePath));
@@ -375,7 +378,10 @@ export async function checkMarkitdownCli(): Promise<PythonCheckResult> {
 
 export interface MsgAttachment {
 	filename: string;
-	dataB64: string;
+	// Absolute path to the attachment bytes written to a temp dir by the Python
+	// helper. The TS consumer reads it into the vault then deletes it. Avoids the
+	// ~33% base64 inflation (and double in-memory copy) of shipping bytes on stdout.
+	tempPath: string;
 	markdown: string;
 }
 
@@ -411,7 +417,10 @@ export async function runMsgConversion(
 		runWithPhases(
 			pythonCommand,
 			['-c', msgScript, absolutePath],
-			{ timeout, env, maxBuffer: 50 * 1024 * 1024 },
+			// Attachment bytes now travel as temp files, not base64 on stdout, so
+			// stdout only carries markdown + filenames + paths. Keep a generous cap
+			// for very large emails, though it is no longer the binding constraint.
+			{ timeout, env, maxBuffer: 200 * 1024 * 1024 },
 			onPhase,
 			(error, stdout, stderr) => {
 				if (error) {
@@ -445,7 +454,7 @@ export async function runMsgConversion(
 				try {
 					const parsed = JSON.parse(stdout) as {
 						body: string;
-						attachments: Array<{ filename: string; data_b64: string; markdown: string }>;
+						attachments: Array<{ filename: string; temp_path: string; markdown: string }>;
 						warning?: string | null;
 					};
 					if (parsed.warning) {
@@ -455,7 +464,7 @@ export async function runMsgConversion(
 						body: parsed.body ?? '',
 						attachments: (parsed.attachments ?? []).map((a) => ({
 							filename: a.filename,
-							dataB64: a.data_b64,
+							tempPath: a.temp_path,
 							markdown: a.markdown,
 						})),
 					});

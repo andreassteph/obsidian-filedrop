@@ -1,4 +1,5 @@
 import io
+import sys
 import types
 from unittest.mock import patch
 
@@ -334,3 +335,47 @@ def test_install_thinking_filter_leaves_clean_content():
     filedrop_convert._install_thinking_filter(client)
     response = client.chat.completions.create(model="m", messages=[])
     assert response.choices[0].message.content == "A plain caption."
+
+
+def _import_real_markitdown():
+    """Load the *installed* markitdown package, bypassing the conftest MagicMock
+    stub. Returns the real MarkItDown class, or None if it isn't installed."""
+    import importlib
+
+    stub = sys.modules.get("markitdown")
+    sys.modules.pop("markitdown", None)
+    try:
+        module = importlib.import_module("markitdown")
+        return module.MarkItDown
+    except Exception:
+        return None
+    finally:
+        # Restore the lightweight stub so the rest of the suite is unaffected.
+        if stub is not None:
+            sys.modules["markitdown"] = stub
+
+
+def test_html_conversion_is_fast(tmp_path):
+    """A tiny HTML file converts end-to-end (real markitdown, no LLM) in well
+    under a second. Guards the no-gateway fast path and proves the lazy openai
+    import keeps trivial conversions quick. Skips when markitdown isn't installed
+    (e.g. the stubbed CI environment)."""
+    import time
+
+    real_markitdown = _import_real_markitdown()
+    if real_markitdown is None:
+        pytest.skip("real markitdown package not installed")
+
+    html = tmp_path / "test.html"
+    html.write_text("<html><body><h1>Drag and Drop</h1><p>A tiny HTML file.</p></body></html>")
+
+    # Empty env → no gateway → convert() takes the plain-markitdown path and never
+    # imports the OpenAI SDK.
+    with patch.object(filedrop_convert, "MarkItDown", real_markitdown):
+        start = time.perf_counter()
+        result = filedrop_convert.convert(str(html), {})
+        elapsed = time.perf_counter() - start
+
+    assert "Drag and Drop" in result
+    assert "A tiny HTML file." in result
+    assert elapsed < 1.0, f"HTML conversion took {elapsed:.3f}s (expected < 1s)"
