@@ -16,15 +16,17 @@ import {
 	suggestFilename,
 	suggestTags,
 } from './src/settings';
-import { runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, noteNameFromFile, replaceTagsBlock, sanitizeFilename } from './src/utils';
+import { MsgAttachment, runMarkitdown, runMsgConversion } from './src/convert';
+import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { join: pathJoin } = require('path') as typeof import('path');
+const { join: pathJoin, dirname: pathDirname } = require('path') as typeof import('path');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createHash } = require('crypto') as typeof import('crypto');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const fsp = require('fs').promises as typeof import('fs').promises;
 
 const sha256 = (buf: ArrayBuffer): string =>
 	createHash('sha256').update(Buffer.from(buf)).digest('hex');
@@ -169,6 +171,43 @@ export default class FileDropPlugin extends Plugin {
 		return { rawName: candidate, rawFilePath: candidatePath };
 	}
 
+	// Read an extracted .msg attachment out of its temp file and write it into
+	// the vault at destPath. The Python helper writes attachment bytes to temp
+	// files (not base64 on stdout) to avoid inflation; we stream them in here.
+	private async writeMsgAttachment(att: MsgAttachment, destPath: string): Promise<void> {
+		const data = await fsp.readFile(att.tempPath);
+		const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+		await this.app.vault.adapter.writeBinary(destPath, ab);
+	}
+
+	// Remove the temp directory holding a .msg's extracted attachments. All
+	// attachments of one email share a single mkdtemp dir, so deleting each
+	// distinct parent once cleans everything up (best-effort; never throws).
+	private async cleanupMsgTempFiles(attachments: MsgAttachment[]): Promise<void> {
+		const dirs = new Set<string>();
+		for (const att of attachments) {
+			if (att.tempPath) dirs.add(pathDirname(att.tempPath));
+		}
+		for (const dir of dirs) {
+			try {
+				await fsp.rm(dir, { recursive: true, force: true });
+			} catch {
+				/* best-effort cleanup */
+			}
+		}
+	}
+
+	// Warn (non-blocking) when a dropped file is large enough that conversion may
+	// be slow. Purely informational — conversion proceeds either way.
+	private warnIfLargeFile(name: string, byteLength: number): void {
+		const limit = this.settings.largeFileWarnMb;
+		if (!limit || limit <= 0) return;
+		const mb = byteLength / (1024 * 1024);
+		if (mb >= limit) {
+			new Notice(`FileDrop: large file ${name} (${mb.toFixed(1)} MB) — conversion may be slow.`);
+		}
+	}
+
 	// Convert each member file of a group directory individually into a
 	// `## <name>` section. Never hand the group directory itself to markitdown:
 	// puremagic raises PureError("Not a regular file") on a directory, which
@@ -185,56 +224,80 @@ export default class FileDropPlugin extends Plugin {
 	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
 		const { vault } = this.app;
 		const basePath: string | undefined = (vault.adapter as any).basePath;
-		const bodyParts: string[] = [];
-		const attachmentFrontmatterLines: string[] = [];
-		let anyError = false;
-		let anyWarning = false;
 
-		for (const { rawName, rawFilePath } of members) {
-			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
-			const isMsgFile = rawName.toLowerCase().endsWith('.msg');
+		// Convert members concurrently (bounded by groupConcurrency) but assemble
+		// every output strictly in member order afterwards. Each worker returns an
+		// index-stable result; we never append on completion, so ordering is
+		// identical regardless of which file finishes first. With concurrency = 1
+		// this is exactly the old sequential loop.
+		type MemberResult = {
+			body: string;
+			attachmentFrontmatterLines: string[];
+			anyError: boolean;
+			anyWarning: boolean;
+		};
 
-			let markdown: string;
-			try {
-				if (isMsgFile) {
-					const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
-					// Keep each .msg's attachments in their own `<file.msg>.attachments/`
-					// subfolder rather than flat in the group dir. Because
-					// vault.adapter.list() is non-recursive, this keeps them out of
-					// the member listing on rerun (no duplicate sections) and avoids
-					// filename collisions between attachments of different emails.
-					const attDirName = `${rawName}.attachments`;
-					if (msgResult.attachments.length > 0) {
-						await this.ensureDir(normalizePath(`${groupDirPath}/${attDirName}`));
+		const results = await mapWithConcurrency<typeof members[number], MemberResult>(
+			members,
+			this.settings.groupConcurrency,
+			async ({ rawName, rawFilePath }) => {
+				const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
+				const isMsgFile = rawName.toLowerCase().endsWith('.msg');
+				const attLines: string[] = [];
+				let err = false;
+				let warn = false;
+
+				let markdown: string;
+				try {
+					if (isMsgFile) {
+						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+						// Keep each .msg's attachments in their own `<file.msg>.attachments/`
+						// subfolder rather than flat in the group dir. Because
+						// vault.adapter.list() is non-recursive, this keeps them out of
+						// the member listing on rerun (no duplicate sections) and avoids
+						// filename collisions between attachments of different emails.
+						const attDirName = `${rawName}.attachments`;
+						if (msgResult.attachments.length > 0) {
+							await this.ensureDir(normalizePath(`${groupDirPath}/${attDirName}`));
+						}
+						const attParts: string[] = [msgResult.body];
+						for (const att of msgResult.attachments) {
+							if (!att.markdown) continue;
+							const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
+							await this.writeMsgAttachment(att, attPath);
+							attLines.push(
+								`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
+							);
+							const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
+							attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
+							if (hasErrorCallout(att.markdown)) err = true;
+							else if (hasWarningCallout(att.markdown)) warn = true;
+						}
+						await this.cleanupMsgTempFiles(msgResult.attachments);
+						markdown = attParts.join('\n\n');
+					} else {
+						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
 					}
-					const attParts: string[] = [msgResult.body];
-					for (const att of msgResult.attachments) {
-						if (!att.markdown) continue;
-						const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
-						const attBuf = Buffer.from(att.dataB64, 'base64');
-						const ab = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-						await vault.adapter.writeBinary(attPath, ab);
-						attachmentFrontmatterLines.push(
-							`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
-						);
-						const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
-						attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-						if (hasErrorCallout(att.markdown)) anyError = true;
-						else if (hasWarningCallout(att.markdown)) anyWarning = true;
-					}
-					markdown = attParts.join('\n\n');
-				} else {
-					markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+					if (hasErrorCallout(markdown)) err = true;
+					else if (hasWarningCallout(markdown)) warn = true;
+				} catch (e) {
+					markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
+					err = true;
 				}
-				if (hasErrorCallout(markdown)) anyError = true;
-				else if (hasWarningCallout(markdown)) anyWarning = true;
-			} catch (e) {
-				markdown = `> [!error] Conversion failed\n> ${e instanceof Error ? e.message : String(e)}`;
-				anyError = true;
-			}
 
-			bodyParts.push(`## ${rawName}\n\n${markdown}`);
-		}
+				return {
+					body: `## ${rawName}\n\n${markdown}`,
+					attachmentFrontmatterLines: attLines,
+					anyError: err,
+					anyWarning: warn,
+				};
+			},
+		);
+
+		const bodyParts = results.map((r) => r.body);
+		const attachmentFrontmatterLines = results.flatMap((r) => r.attachmentFrontmatterLines);
+		const anyError = results.some((r) => r.anyError);
+		const anyWarning = results.some((r) => r.anyWarning);
 
 		return { bodyParts, attachmentFrontmatterLines, anyError, anyWarning };
 	}
@@ -302,6 +365,7 @@ export default class FileDropPlugin extends Plugin {
 			const members: { rawName: string; rawFilePath: string }[] = [];
 			for (const file of files) {
 				const buffer = await file.arrayBuffer();
+				this.warnIfLargeFile(file.name, buffer.byteLength);
 				let rawName = file.name;
 				let rawFilePath = normalizePath(`${groupDirPath}/${rawName}`);
 				let fDupIdx = 1;
@@ -449,6 +513,7 @@ export default class FileDropPlugin extends Plugin {
 		await this.ensureDir(subfolderPath);
 
 		const buffer = await file.arrayBuffer();
+		this.warnIfLargeFile(file.name, buffer.byteLength);
 		const newHash = sha256(buffer);
 
 		// Resolve a raw-file name before writing: skip identical re-drops, and
@@ -525,9 +590,7 @@ export default class FileDropPlugin extends Plugin {
 
 					for (const att of msgResult.attachments) {
 						const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
-						const attBuf = Buffer.from(att.dataB64, 'base64');
-						const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-						await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
+						await this.writeMsgAttachment(att, attFilePath);
 						attachmentFrontmatterLines.push(`  - "[[${monthSlug}/${category}/${attDirName}/${att.filename}]]"`);
 					}
 				}
@@ -540,6 +603,7 @@ export default class FileDropPlugin extends Plugin {
 					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
 					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
 				}
+				await this.cleanupMsgTempFiles(msgResult.attachments);
 				markdownBody = bodyParts.join('\n\n');
 			} else {
 				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
@@ -668,9 +732,7 @@ export default class FileDropPlugin extends Plugin {
 					await this.ensureDir(attDirPath);
 					for (const att of msgResult.attachments) {
 						const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
-						const attBuf = Buffer.from(att.dataB64, 'base64');
-						const attArrayBuffer = attBuf.buffer.slice(attBuf.byteOffset, attBuf.byteOffset + attBuf.byteLength) as ArrayBuffer;
-						await vault.adapter.writeBinary(attFilePath, attArrayBuffer);
+						await this.writeMsgAttachment(att, attFilePath);
 					}
 				}
 
@@ -682,6 +744,7 @@ export default class FileDropPlugin extends Plugin {
 					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
 					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
 				}
+				await this.cleanupMsgTempFiles(msgResult.attachments);
 				newBody = bodyParts.join('\n\n');
 			} else {
 				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);

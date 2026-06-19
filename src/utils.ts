@@ -1,3 +1,33 @@
+// Run `fn` over `items` with at most `limit` calls in flight at once, returning
+// the results in input order regardless of completion order. The returned array
+// is keyed by the original index, so callers get stable ordering for free.
+//
+// With limit === 1 this is strictly sequential and behaviorally identical to a
+// plain `for await` loop: item N+1 starts only after item N has fully settled.
+// `fn` is expected not to reject (callers wrap per-item work in try/catch); if it
+// does, the rejection propagates out of the returned promise.
+export async function mapWithConcurrency<T, R>(
+	items: T[],
+	limit: number,
+	fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+	const results: R[] = new Array(items.length);
+	const max = Math.max(1, Math.floor(limit) || 1);
+	let next = 0;
+
+	const worker = async (): Promise<void> => {
+		for (;;) {
+			const i = next++;
+			if (i >= items.length) return;
+			results[i] = await fn(items[i], i);
+		}
+	};
+
+	const workerCount = Math.min(max, items.length);
+	await Promise.all(Array.from({ length: workerCount }, () => worker()));
+	return results;
+}
+
 export function getMonthSlug(): string {
 	const d = new Date();
 	const yyyy = d.getFullYear();

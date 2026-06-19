@@ -505,8 +505,11 @@ export class FileDropView extends ItemView {
 		const rawFm = this.app.metadataCache.getFileCache(noteFile)?.frontmatter ?? {};
 		const existingSummary: string = rawFm.summary ?? '';
 
+		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
+
 		// Build metadata from cached fields if they exist, otherwise extract fresh
 		let metadata: { date: string | null; type: string | null; people: string[] | null };
+		let metadataFillPromise: ReturnType<typeof fillMetadataWithLLM> | null = null;
 		const hasCachedDate = 'file_date' in rawFm && rawFm.file_date;
 		const hasCachedType = 'file_type' in rawFm && rawFm.file_type;
 		const hasCachedPeople = 'file_people' in rawFm && rawFm.file_people;
@@ -519,27 +522,28 @@ export class FileDropView extends ItemView {
 			};
 		} else {
 			metadata = extractActivityMetadata(body, filePath, noteFile.stat);
-			const gatewayActive = !!gateway && isGatewayEnabled(gateway);
 			const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
-
 			if (gatewayActive && hasNullMetadata) {
-				const fillResult = await fillMetadataWithLLM(metadata, body, gateway!, () => this.plugin.saveSettings());
-				if (fillResult.ok) metadata = fillResult.value;
+				metadataFillPromise = fillMetadataWithLLM(metadata, body, gateway!, () => this.plugin.saveSettings());
 			}
+		}
+
+		// The metadata fill and the summary both depend only on `body` and are
+		// independent of each other, so run them concurrently instead of in series.
+		const summaryPromise = (gatewayActive && !existingSummary)
+			? summarizeContent(body, gateway!, undefined, () => this.plugin.saveSettings())
+			: null;
+
+		const [fillResult, summaryResult] = await Promise.all([metadataFillPromise, summaryPromise]);
+		if (fillResult?.ok) metadata = fillResult.value;
+
+		let summary = existingSummary;
+		if (summaryResult?.ok) {
+			await this.writeNoteSummary(noteFile.path, summaryResult.value);
+			summary = summaryResult.value;
 		}
 
 		const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
-		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
-
-		// Generate summary if missing
-		let summary = existingSummary;
-		if (gatewayActive && !existingSummary) {
-			const summaryResult = await summarizeContent(body, gateway!, undefined, () => this.plugin.saveSettings());
-			if (summaryResult.ok) {
-				await this.writeNoteSummary(noteFile.path, summaryResult.value);
-				summary = summaryResult.value;
-			}
-		}
 
 		// Build full frontmatter for matching
 		const noteFrontmatter: Record<string, unknown> = { ...rawFm };
@@ -653,14 +657,16 @@ export class FileDropView extends ItemView {
 			const i = content.indexOf('\n---\n');
 			const body = i >= 0 ? content.slice(i + 5) : content;
 
-			const result = await reviseSummary(body, baseSummary, instruction, gateway, undefined, persist);
+			// Revising the summary and re-deriving metadata are independent (both
+			// read only `body`), so run them concurrently.
+			let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
+			const [result, fillResult] = await Promise.all([
+				reviseSummary(body, baseSummary, instruction, gateway, undefined, persist),
+				fillMetadataWithLLM(metadata, body, gateway, persist),
+			]);
 			if (!result.ok) {
 				return { ok: false, message: this.llmErrorMessage(result.reason, result.detail) };
 			}
-
-			// Overwrite-all metadata: re-derive every field from the document.
-			let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
-			const fillResult = await fillMetadataWithLLM(metadata, body, gateway, persist);
 			if (fillResult.ok) metadata = fillResult.value;
 
 			return { ok: true, summary: result.value, metadata };
@@ -697,19 +703,23 @@ export class FileDropView extends ItemView {
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
 		// Extract summary
-		const result = await summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings());
+		// Summary and metadata-fill both read only `body` and are independent, so
+		// kick them off together. Extract metadata first to know whether a fill is needed.
+		let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
+		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+		const fillPromise = (isGatewayEnabled(gateway) && hasNullMetadata)
+			? fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings())
+			: null;
+
+		const [result, fillResult] = await Promise.all([
+			summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings()),
+			fillPromise,
+		]);
 		if (!result.ok) {
 			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;
 		}
-
-		// Extract metadata and optionally fill gaps with LLM
-		let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
-		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
-		if (isGatewayEnabled(gateway) && hasNullMetadata) {
-			const fillResult = await fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings());
-			if (fillResult.ok) metadata = fillResult.value;
-		}
+		if (fillResult?.ok) metadata = fillResult.value;
 
 		// Save summary and metadata to frontmatter
 		await this.writeNoteSummaryAndMetadata(entry.notePath, result.value, metadata);
@@ -765,18 +775,23 @@ export class FileDropView extends ItemView {
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
 
-		const result = await summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings());
+		// Summary and metadata-fill both read only `body` and are independent, so
+		// kick them off together. Extract metadata first to know whether a fill is needed.
+		let metadata = extractActivityMetadata(body, file.path, file.stat);
+		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+		const fillPromise = (isGatewayEnabled(gateway) && hasNullMetadata)
+			? fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings())
+			: null;
+
+		const [result, fillResult] = await Promise.all([
+			summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings()),
+			fillPromise,
+		]);
 		if (!result.ok) {
 			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
 			return;
 		}
-
-		let metadata = extractActivityMetadata(body, file.path, file.stat);
-		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
-		if (isGatewayEnabled(gateway) && hasNullMetadata) {
-			const fillResult = await fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings());
-			if (fillResult.ok) metadata = fillResult.value;
-		}
+		if (fillResult?.ok) metadata = fillResult.value;
 
 		await this.writeNoteSummaryAndMetadata(file.path, result.value, metadata);
 		new Notice('FileDrop: summary added.');

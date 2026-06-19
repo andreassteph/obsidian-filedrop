@@ -10,7 +10,12 @@ import re
 import sys
 
 from markitdown import MarkItDown
-from openai import OpenAI
+
+# Imported lazily in _make_client so the no-LLM conversion path (plain markitdown
+# text extraction) doesn't pay the OpenAI SDK import cost. Tests patch this symbol,
+# so it must exist at module scope; the lazy import only fills it when actually
+# needed and the attribute is still absent.
+OpenAI = None
 
 # Reasoning ("thinking") models emit their chain-of-thought inline in the
 # assistant message before the real answer. We strip it so image descriptions
@@ -91,6 +96,10 @@ def _make_client(env, **kwargs):
     # max_retries=0 because the SDK's default 2 retries silently triple the
     # wait when a gateway hangs — the user is better served by a fast clean
     # error and the existing TS-side error handling.
+    global OpenAI
+    if OpenAI is None:
+        from openai import OpenAI as _OpenAI
+        OpenAI = _OpenAI
     key = env["FILEDROP_LLM_KEY"]
     kwargs.setdefault("timeout", _llm_timeout(env))
     kwargs.setdefault("max_retries", 0)
@@ -142,6 +151,14 @@ def _emit_phase(phase):
     print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
 
 
+def _llm_configured(env):
+    """Whether an LLM gateway is configured. The TS side only runs this script
+    with these env vars set (or for the describe path), but guarding here lets
+    convert() still extract a file's text via plain markitdown when they are
+    absent — and skips importing the OpenAI SDK entirely on that fast path."""
+    return bool(env.get("FILEDROP_LLM_KEY") and env.get("FILEDROP_LLM_MODEL"))
+
+
 def convert(path, env):
     # markitdown hands the path to puremagic, which raises an uncaught
     # PureError("Not a regular file") for anything that isn't a regular file
@@ -153,6 +170,13 @@ def convert(path, env):
         return ""
 
     is_pdf = path.lower().endswith(".pdf")
+
+    # No gateway configured: plain markitdown text extraction. Keeps trivial
+    # conversions fast (the OpenAI SDK is never imported) and lets convert() work
+    # without an LLM at all.
+    if not _llm_configured(env):
+        _emit_phase("markitdown")
+        return _convert_without_llm(path)
 
     # Try markitdown with LLM support first. build_converter passes llm_client
     # and llm_model to MarkItDown, so embedded images inside the PDF are
@@ -209,6 +233,7 @@ def _convert_pdf_pages_with_llm(path, env):
     so the caller falls back to plain markitdown text extraction.
     """
     import base64
+    from concurrent.futures import ThreadPoolExecutor
 
     if not _vision_enabled(env):
         return ("> [!warning] Scanned-PDF OCR skipped — the configured model has no "
@@ -237,11 +262,16 @@ def _convert_pdf_pages_with_llm(path, env):
     if not doc.page_count:
         return ""
 
-    pages = []
+    # Render every page up front: PyMuPDF documents are not safe to access from
+    # multiple threads, and rendering is fast/CPU-bound. The slow part is the
+    # per-page LLM request, which we then run in a small thread pool. The OpenAI
+    # client (httpx under the hood) is safe to share across threads.
     mat = fitz.Matrix(2, 2)  # 2× zoom for better OCR quality
-    for page_num, page in enumerate(doc, 1):
-        pix = page.get_pixmap(matrix=mat)
-        img_b64 = base64.b64encode(pix.tobytes("png")).decode("ascii")
+    images = [base64.b64encode(page.get_pixmap(matrix=mat).tobytes("png")).decode("ascii")
+              for page in doc]
+
+    def _ocr_page(item):
+        page_num, img_b64 = item
         try:
             resp = client.chat.completions.create(
                 model=env["FILEDROP_LLM_MODEL"],
@@ -259,7 +289,14 @@ def _convert_pdf_pages_with_llm(path, env):
             text = strip_thinking(text)
         except Exception as exc:
             text = f"> [!error] Page {page_num} OCR failed: {exc}"
-        pages.append(f"### Page {page_num}\n\n{text}")
+        return f"### Page {page_num}\n\n{text}"
+
+    items = list(enumerate(images, 1))
+    max_workers = min(4, len(items))
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        # pool.map preserves input order, so pages stay in page order regardless
+        # of which request finishes first.
+        pages = list(pool.map(_ocr_page, items))
 
     return "\n\n".join(pages)
 
