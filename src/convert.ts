@@ -104,10 +104,12 @@ const PYTHON_LLM_TIMEOUT_S = 150;
 // Node-side subprocess caps. Add headroom over PYTHON_LLM_TIMEOUT_S so a
 // single slow-but-eventually-finishing request doesn't get killed mid-flight.
 const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
-// PPTX and MSG conversions call the LLM once per image/slide/attachment
-// sequentially (markitdown's PptxConverter isn't parallelised), so a deck
-// with many images needs a much larger overall budget than a single file.
-const PPTX_LLM_TIMEOUT_MS = 720_000;
+// Per-page/slide budget for multi-page formats (PPTX and PDF) where the LLM
+// is called once per image/page sequentially.
+const LLM_TIMEOUT_PER_PAGE_MS = 50_000;
+// MSG conversion runs body + every attachment through the LLM sequentially,
+// so scanned PDFs with many pages need a much larger overall budget — but
+// each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
 const MSG_LLM_TIMEOUT_MS = 720_000;
 
 function conversionErrorBody(title: string, detail: string): string {
@@ -199,6 +201,27 @@ function subprocessErrorDetail(
 	return 'The conversion process exited unexpectedly without any error output.';
 }
 
+// Quick pre-flight count for multi-page formats so we can size the subprocess
+// timeout before starting the (potentially long) conversion.
+function getPageCount(absolutePath: string, pythonCommand: string): Promise<number | null> {
+	const ext = absolutePath.toLowerCase();
+	let script: string;
+	if (ext.endsWith('.pptx')) {
+		script = 'from pptx import Presentation; import sys; print(len(Presentation(sys.argv[1]).slides))';
+	} else if (ext.endsWith('.pdf')) {
+		script = 'import fitz; import sys; print(fitz.open(sys.argv[1]).page_count)';
+	} else {
+		return Promise.resolve(null);
+	}
+	return new Promise((resolve) => {
+		execFile(pythonCommand, ['-c', script, absolutePath], { timeout: 10_000 }, (error: Error | null, stdout: string) => {
+			if (error) { resolve(null); return; }
+			const n = parseInt(stdout.trim(), 10);
+			resolve(isNaN(n) ? null : n);
+		});
+	});
+}
+
 // Executables carry no extractable text, so ask the LLM what the file most
 // likely is from its name. The reply is an educated guess, flagged as such.
 function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
@@ -265,7 +288,10 @@ export async function runMarkitdown(
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
-		const subprocessTimeout = fileExt === '.pptx' ? PPTX_LLM_TIMEOUT_MS : LLM_TIMEOUT_MS;
+		const pageCount = await getPageCount(absolutePath, pythonCommand);
+		const subprocessTimeout = pageCount != null
+			? Math.max(LLM_TIMEOUT_MS, pageCount * LLM_TIMEOUT_PER_PAGE_MS)
+			: LLM_TIMEOUT_MS;
 		return new Promise((resolve) => {
 			runWithPhases(
 				pythonCommand,

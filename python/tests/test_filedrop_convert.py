@@ -177,25 +177,27 @@ def test_convert_pdf_falls_back_to_pymupdf_when_markitdown_raises():
 
 
 def test_convert_pptx_keeps_plain_markitdown_when_llm_step_raises():
-    """LLM-enhanced step raises for a PPTX → keep the plain markitdown text."""
+    """LLM-enhanced step raises for a PPTX → error callout + plain markitdown text."""
     with patch.object(filedrop_convert, "OpenAI"), \
             patch.object(filedrop_convert, "MarkItDown") as markitdown, \
             patch.object(filedrop_convert, "build_converter") as build_converter:
         build_converter.return_value.convert.side_effect = Exception("llm boom")
         markitdown.return_value.convert.return_value.text_content = "# Slide text"
         result = filedrop_convert.convert("/tmp/deck.pptx", dict(BASE_ENV))
-    assert result == "# Slide text"
+    assert "[!error]" in result
+    assert "# Slide text" in result
 
 
-def test_convert_pptx_returns_empty_when_both_steps_fail():
-    """LLM step and the plain fallback both raise → return "" (never crash)."""
+def test_convert_pptx_returns_error_callout_when_both_steps_fail():
+    """LLM step and the plain fallback both raise → error callout only, never crash."""
     with patch.object(filedrop_convert, "OpenAI"), \
             patch.object(filedrop_convert, "MarkItDown") as markitdown, \
             patch.object(filedrop_convert, "build_converter") as build_converter:
         build_converter.return_value.convert.side_effect = Exception("llm boom")
         markitdown.return_value.convert.side_effect = Exception("corrupt deck")
         result = filedrop_convert.convert("/tmp/deck.pptx", dict(BASE_ENV))
-    assert result == ""
+    assert "[!error]" in result
+    assert "llm boom" in result
 
 
 def test_convert_skips_directory():

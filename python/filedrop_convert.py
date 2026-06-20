@@ -284,6 +284,12 @@ def _llm_configured(env):
     return bool(env.get("FILEDROP_LLM_KEY") and env.get("FILEDROP_LLM_MODEL"))
 
 
+def _with_llm_error(exc, plain_text):
+    """Prepend an error callout to the plain markitdown fallback text."""
+    callout = f"> [!error] LLM conversion failed — plain text only\n> {type(exc).__name__}: {exc}"
+    return f"{callout}\n\n{plain_text}" if plain_text and plain_text.strip() else callout
+
+
 def convert(path, env):
     # markitdown hands the path to puremagic, which raises an uncaught
     # PureError("Not a regular file") for anything that isn't a regular file
@@ -331,10 +337,8 @@ def convert(path, env):
         model = env.get("FILEDROP_LLM_MODEL", "(not set)")
         print(f"[filedrop] markitdown LLM step failed [{model} @ {url}]: {type(exc).__name__}: {exc}", file=sys.stderr)
         if not is_pdf:
-            # The LLM-enhanced step failed for a non-PDF (e.g. a PPTX markitdown
-            # could not fully process). Keep the plain markitdown conversion so
-            # the file's extractable text is still captured.
-            return _convert_without_llm(convert_path)
+            plain = _convert_without_llm(convert_path)
+            return _with_llm_error(exc, plain)
     finally:
         if temp_image:
             try:
@@ -346,7 +350,11 @@ def convert(path, env):
     # via PyMuPDF and OCR with the LLM.
     if is_pdf:
         _emit_phase("llm-image")
-        result = _convert_pdf_pages_with_llm(path, env)
+        try:
+            result = _convert_pdf_pages_with_llm(path, env)
+        except Exception as exc:
+            plain = _convert_without_llm(path)
+            return _with_llm_error(exc, plain)
         if result:
             return result
 
@@ -424,10 +432,13 @@ def _convert_pdf_pages_with_llm(path, env):
     show_progress = total > PAGE_PROGRESS_THRESHOLD
     progress_lock = threading.Lock()
     completed = 0
+    stop_event = threading.Event()
 
     def _ocr_page(item):
         nonlocal completed
         page_num, img_b64 = item
+        if stop_event.is_set():
+            return None
         try:
             resp = client.chat.completions.create(
                 model=env["FILEDROP_LLM_MODEL"],
@@ -444,7 +455,9 @@ def _convert_pdf_pages_with_llm(path, env):
             text = (resp.choices[0].message.content or "").strip()
             text = strip_thinking(text)
         except Exception as exc:
-            text = f"> [!error] Page {page_num} OCR failed: {exc}"
+            stop_event.set()
+            print(f"[filedrop] PDF OCR failed on page {page_num}: {type(exc).__name__}: {exc}", file=sys.stderr)
+            raise
         if show_progress:
             with progress_lock:
                 completed += 1
@@ -459,7 +472,7 @@ def _convert_pdf_pages_with_llm(path, env):
         # completion order since that reflects actual work done.
         pages = list(pool.map(_ocr_page, items))
 
-    return "\n\n".join(pages)
+    return "\n\n".join(p for p in pages if p is not None)
 
 
 DEFAULT_DESCRIBE_PROMPT = (
