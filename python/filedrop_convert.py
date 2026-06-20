@@ -218,9 +218,49 @@ def _compressed_image_path(path, env):
         return None
 
 
-def build_converter(env):
+def _install_progress_counter(client, total):
+    """Wrap the client so every chat-completion call (one per slide/image that
+    markitdown's built-in converters describe) reports `[filedrop:page-progress]`
+    on stderr. Only installed when `total` is large enough to be worth showing."""
+    import threading
+
+    completions = client.chat.completions
+    original_create = completions.create
+    lock = threading.Lock()
+    count = 0
+
+    def create(*args, **kwargs):
+        nonlocal count
+        response = original_create(*args, **kwargs)
+        with lock:
+            count += 1
+            _emit_progress(count, total)
+        return response
+
+    completions.create = create
+    return client
+
+
+# Below this many pages/slides a progress indicator is more noise than signal.
+PAGE_PROGRESS_THRESHOLD = 3
+
+
+def _pptx_slide_count(path):
+    """Best-effort slide count for a .pptx, used to decide whether to show a
+    page-progress indicator. Returns None on any failure (e.g. python-pptx
+    missing or the file is malformed) so callers can skip progress reporting."""
+    try:
+        from pptx import Presentation  # already a markitdown dependency
+        return len(Presentation(path).slides)
+    except Exception:
+        return None
+
+
+def build_converter(env, progress_total=None):
     client = _make_client(env)
     _install_thinking_filter(client)
+    if progress_total and progress_total > PAGE_PROGRESS_THRESHOLD:
+        _install_progress_counter(client, progress_total)
     kwargs = {"llm_client": client, "llm_model": env["FILEDROP_LLM_MODEL"]}
     prompt = env.get("FILEDROP_LLM_PROMPT")
     if prompt:
@@ -230,6 +270,10 @@ def build_converter(env):
 
 def _emit_phase(phase):
     print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
+
+
+def _emit_progress(current, total):
+    print(f"[filedrop:page-progress] {current}/{total}", file=sys.stderr, flush=True)
 
 
 def _llm_configured(env):
@@ -277,8 +321,9 @@ def convert(path, env):
     temp_image = _compressed_image_path(path, env) if is_image else None
     if temp_image:
         convert_path = temp_image
+    progress_total = _pptx_slide_count(path) if path.lower().endswith(".pptx") else None
     try:
-        result = build_converter(env).convert(convert_path).text_content
+        result = build_converter(env, progress_total=progress_total).convert(convert_path).text_content
         if result and result.strip():
             return result
     except Exception as exc:
@@ -329,6 +374,7 @@ def _convert_pdf_pages_with_llm(path, env):
     so the caller falls back to plain markitdown text extraction.
     """
     import base64
+    import threading
     from concurrent.futures import ThreadPoolExecutor
 
     if not _vision_enabled(env):
@@ -374,7 +420,13 @@ def _convert_pdf_pages_with_llm(path, env):
         for page in doc
     ]
 
+    total = len(images)
+    show_progress = total > PAGE_PROGRESS_THRESHOLD
+    progress_lock = threading.Lock()
+    completed = 0
+
     def _ocr_page(item):
+        nonlocal completed
         page_num, img_b64 = item
         try:
             resp = client.chat.completions.create(
@@ -393,13 +445,18 @@ def _convert_pdf_pages_with_llm(path, env):
             text = strip_thinking(text)
         except Exception as exc:
             text = f"> [!error] Page {page_num} OCR failed: {exc}"
+        if show_progress:
+            with progress_lock:
+                completed += 1
+                _emit_progress(completed, total)
         return f"### Page {page_num}\n\n{text}"
 
     items = list(enumerate(images, 1))
     max_workers = min(4, len(items))
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         # pool.map preserves input order, so pages stay in page order regardless
-        # of which request finishes first.
+        # of which request finishes first; progress is still reported in
+        # completion order since that reflects actual work done.
         pages = list(pool.map(_ocr_page, items))
 
     return "\n\n".join(pages)

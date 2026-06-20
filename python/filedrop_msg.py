@@ -308,6 +308,8 @@ def _convert_pdf_pages_with_llm(path, env):
     max_bytes, quality, min_dim = _image_limits(env)
     pages = []
     mat = fitz.Matrix(2, 2)  # 2× zoom → better OCR quality
+    total = doc.page_count
+    show_progress = total > PAGE_PROGRESS_THRESHOLD
     for page_num, page in enumerate(doc, 1):
         pix = page.get_pixmap(matrix=mat)
         # Compressed JPEG instead of raw PNG: far smaller payload (avoids HTTP
@@ -331,13 +333,23 @@ def _convert_pdf_pages_with_llm(path, env):
             text = _strip_thinking(text)
         except Exception as exc:
             text = f"> [!error] Page {page_num} OCR failed: {exc}"
+        if show_progress:
+            _emit_progress(page_num, total)
         pages.append(f"### Page {page_num}\n\n{text}")
 
     return "\n\n".join(pages)
 
 
+# Below this many pages a progress indicator is more noise than signal.
+PAGE_PROGRESS_THRESHOLD = 3
+
+
 def _emit_phase(phase):
     print(f"[filedrop:phase] {phase}", file=sys.stderr, flush=True)
+
+
+def _emit_progress(current, total):
+    print(f"[filedrop:page-progress] {current}/{total}", file=sys.stderr, flush=True)
 
 
 def _error_callout(title, detail):

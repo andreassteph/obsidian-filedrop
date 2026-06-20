@@ -16,7 +16,7 @@ import {
 	suggestFilename,
 	suggestTags,
 } from './src/settings';
-import { MsgAttachment, runMarkitdown, runMsgConversion } from './src/convert';
+import { MsgAttachment, OnProgress, runMarkitdown, runMsgConversion } from './src/convert';
 import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
@@ -236,6 +236,7 @@ export default class FileDropPlugin extends Plugin {
 		gateway: LlmGateway | null,
 		onPhase: (phase: 'markitdown' | 'llm-image') => void,
 		isExternal = false,
+		onProgress?: OnProgress,
 	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
 		const { vault } = this.app;
 		const basePath: string | undefined = (vault.adapter as any).basePath;
@@ -267,7 +268,7 @@ export default class FileDropPlugin extends Plugin {
 				let markdown: string;
 				try {
 					if (isMsgFile) {
-						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
 						// Keep each .msg's attachments in their own `<file.msg>.attachments/`
 						// subfolder rather than flat in the group dir. Because
 						// vault.adapter.list() is non-recursive, this keeps them out of
@@ -301,7 +302,7 @@ export default class FileDropPlugin extends Plugin {
 						await this.cleanupMsgTempFiles(msgResult.attachments);
 						markdown = attParts.join('\n\n');
 					} else {
-						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 					}
 					if (hasErrorCallout(markdown)) err = true;
 					else if (hasWarningCallout(markdown)) warn = true;
@@ -384,6 +385,10 @@ export default class FileDropPlugin extends Plugin {
 				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
+			const onProgress: OnProgress = (current, total) => {
+				entry.pageProgress = { current, total };
+				this.getActiveView()?.renderFileList();
+			};
 
 			// Write every dropped file into the group dir first, then convert each
 			// individually via convertGroupDir (never the directory itself).
@@ -407,13 +412,14 @@ export default class FileDropPlugin extends Plugin {
 			}
 
 			const converted = await this.convertGroupDir(
-				groupDirPath, groupDirName, monthSlug, category, members, gateway, onPhase,
+				groupDirPath, groupDirName, monthSlug, category, members, gateway, onPhase, false, onProgress,
 			);
 			attachmentFrontmatterLines.push(...converted.attachmentFrontmatterLines);
 			const bodyParts = converted.bodyParts;
 			const anyError = converted.anyError;
 			const anyWarning = converted.anyWarning;
 
+			entry.pageProgress = undefined;
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
@@ -589,6 +595,10 @@ export default class FileDropPlugin extends Plugin {
 				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
+			const onProgress: OnProgress = (current, total) => {
+				entry.pageProgress = { current, total };
+				this.getActiveView()?.renderFileList();
+			};
 
 			const basePath: string | undefined = (vault.adapter as any).basePath;
 			const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
@@ -606,7 +616,7 @@ export default class FileDropPlugin extends Plugin {
 			let attachmentHadWarning = false;
 
 			if (isMsgFile) {
-				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
 
 				const attDirName = `${rawName}.attachments`;
 				if (msgResult.attachments.length > 0) {
@@ -631,7 +641,7 @@ export default class FileDropPlugin extends Plugin {
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				markdownBody = bodyParts.join('\n\n');
 			} else {
-				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
 
 			if (this.cancelledConversions.delete(notePath)) return;
@@ -653,6 +663,7 @@ export default class FileDropPlugin extends Plugin {
 				}
 			}
 
+			entry.pageProgress = undefined;
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
@@ -732,6 +743,10 @@ export default class FileDropPlugin extends Plugin {
 				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
+			const onProgress: OnProgress = (current, total) => {
+				entry.pageProgress = { current, total };
+				this.getActiveView()?.renderFileList();
+			};
 
 			// Group entries store the `.group` directory as filePath. Converting
 			// the directory would hand it to puremagic and fail with
@@ -755,13 +770,13 @@ export default class FileDropPlugin extends Plugin {
 					.filter((p) => !p.toLowerCase().endsWith('.md'))
 					.map((p) => ({ rawName: p.split('/').pop() as string, rawFilePath: p }));
 				const converted = await this.convertGroupDir(
-					entry.filePath, groupDirName, monthSlug, category, members, gateway, onPhase,
+					entry.filePath, groupDirName, monthSlug, category, members, gateway, onPhase, false, onProgress,
 				);
 				newBody = converted.bodyParts.join('\n\n---\n\n');
 				attachmentHadError = converted.anyError;
 				attachmentHadWarning = converted.anyWarning;
 			} else if (isMsgFile) {
-				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase);
+				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
 				// Match the initial-drop layout: attachments live next to the .msg
 				// in `<file.msg>.attachments/` (full name, extension included). The
 				// note's frontmatter `attachments:` list already points there.
@@ -797,9 +812,10 @@ export default class FileDropPlugin extends Plugin {
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				newBody = bodyParts.join('\n\n');
 			} else {
-				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
 
+			entry.pageProgress = undefined;
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
@@ -999,6 +1015,10 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 		};
+		const onProgress: OnProgress = (current, total) => {
+			entry.pageProgress = { current, total };
+			this.getActiveView()?.renderFileList();
+		};
 
 		try {
 			const isMsgFile = baseName.toLowerCase().endsWith('.msg');
@@ -1007,7 +1027,7 @@ export default class FileDropPlugin extends Plugin {
 			let attachmentHadWarning = false;
 
 			if (isMsgFile) {
-				const msgResult = await runMsgConversion(absPath, this.settings.pythonCommand, gateway, onPhase);
+				const msgResult = await runMsgConversion(absPath, this.settings.pythonCommand, gateway, onPhase, onProgress);
 				const parts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
 					if (!att.markdown) continue;
@@ -1017,9 +1037,10 @@ export default class FileDropPlugin extends Plugin {
 				}
 				body = parts.join('\n\n');
 			} else {
-				body = await runMarkitdown(absPath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+				body = await runMarkitdown(absPath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
 
+			entry.pageProgress = undefined;
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
@@ -1091,11 +1112,16 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 		};
+		const onProgress: OnProgress = (current, total) => {
+			entry.pageProgress = { current, total };
+			this.getActiveView()?.renderFileList();
+		};
 
 		try {
-			const converted = await this.convertGroupDir(absDir, baseName, '', 'external', members, gateway, onPhase, true);
+			const converted = await this.convertGroupDir(absDir, baseName, '', 'external', members, gateway, onPhase, true, onProgress);
 			const combinedBody = converted.bodyParts.join('\n\n---\n\n');
 
+			entry.pageProgress = undefined;
 			entry.status = 'converting-llm-tags';
 			this.getActiveView()?.renderFileList();
 
