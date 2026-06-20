@@ -13,11 +13,13 @@ import {
 	isErrorBody,
 	migrateLegacyLlmFields,
 	parsePreferredTags,
+	renderSlidesPlain,
+	structurePptxSlides,
 	suggestFilename,
 	suggestTags,
 } from './src/settings';
-import { MsgAttachment, OnProgress, runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, sanitizeFilename } from './src/utils';
+import { MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
+import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
@@ -188,16 +190,78 @@ export default class FileDropPlugin extends Plugin {
 	// Read an extracted .msg attachment out of its temp file and write it into
 	// the vault at destPath. The Python helper writes attachment bytes to temp
 	// files (not base64 on stdout) to avoid inflation; we stream them in here.
-	private async writeMsgAttachment(att: MsgAttachment, destPath: string): Promise<void> {
-		const data = await fs.promises.readFile(att.tempPath);
+	// Read bytes a Python helper wrote to a temp file and write them into the
+	// vault at destPath. Shared by .msg attachments and extracted PPTX pictures.
+	private async writeBinaryFromTemp(tempPath: string, destPath: string): Promise<void> {
+		const data = await fs.promises.readFile(tempPath);
 		const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 		await this.app.vault.adapter.writeBinary(destPath, ab);
 	}
 
-	// Remove the temp directory holding a .msg's extracted attachments. All
-	// attachments of one email share a single mkdtemp dir, so deleting each
-	// distinct parent once cleans everything up (best-effort; never throws).
-	private async cleanupMsgTempFiles(attachments: MsgAttachment[]): Promise<void> {
+	private async writeMsgAttachment(att: MsgAttachment, destPath: string): Promise<void> {
+		await this.writeBinaryFromTemp(att.tempPath, destPath);
+	}
+
+	// Convert a .pptx into structured Markdown: extract its embedded images into
+	// `picturesDirVaultPath` (copied from the Python helper's temp dir), reflow
+	// the slides via the LLM (falling back to a deterministic geometry render),
+	// and point the image links at `picturesDirName`. `filenamePrefix`
+	// disambiguates pictures when several decks share one note (group mode).
+	// Falls back to markitdown when structured extraction is unavailable.
+	private async convertPptxNote(
+		absolutePath: string,
+		gateway: LlmGateway | null,
+		onPhase: OnPhase | undefined,
+		onProgress: OnProgress | undefined,
+		picturesDirVaultPath: string,
+		picturesDirName: string,
+		filenamePrefix = '',
+	): Promise<string> {
+		const result = await convertPptx(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+		if (!result) {
+			return runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
+		}
+
+		// Apply the per-source prefix to the picture references so the slide data,
+		// the copied files, and the rewritten links all agree.
+		if (filenamePrefix) {
+			for (const slide of result.slides) {
+				for (const el of slide.elements) {
+					if (el.type === 'picture') el.filename = `${filenamePrefix}${el.filename}`;
+				}
+			}
+		}
+
+		const writtenNames = new Set<string>();
+		if (result.pictures.length > 0) {
+			await this.ensureDir(picturesDirVaultPath);
+			for (const pic of result.pictures) {
+				const destName = `${filenamePrefix}${pic.filename}`;
+				await this.writeBinaryFromTemp(pic.tempPath, normalizePath(`${picturesDirVaultPath}/${destName}`));
+				writtenNames.add(destName);
+			}
+			await this.cleanupMsgTempFiles(result.pictures);
+		}
+
+		const structured = await structurePptxSlides(result.slides, gateway, () => this.saveSettings());
+		const body = structured.ok ? structured.value : renderSlidesPlain(result.slides);
+		const linked = rewriteImageLinks(body, picturesDirName, writtenNames);
+
+		// Guard against a model that ignored "echo the ref verbatim": append any
+		// extracted image the body never referenced so none is silently orphaned.
+		const missing = [...writtenNames].filter(
+			(name) => !linked.includes(encodeURI(`${picturesDirName}/${name}`)),
+		);
+		if (missing.length === 0) return linked;
+		const appended = missing.map((name) => `![](${encodeURI(`${picturesDirName}/${name}`)})`).join('\n\n');
+		return `${linked}\n\n## Unplaced images\n\n${appended}`;
+	}
+
+	// Remove the temp directory holding a .msg's extracted attachments (or a
+	// .pptx's extracted pictures). All items share a single mkdtemp dir, so
+	// deleting each distinct parent once cleans everything up (best-effort;
+	// never throws).
+	private async cleanupMsgTempFiles(attachments: Array<{ tempPath?: string }>): Promise<void> {
 		const dirs = new Set<string>();
 		for (const att of attachments) {
 			if (att.tempPath) dirs.add(pathDirname(att.tempPath));
@@ -235,6 +299,8 @@ export default class FileDropPlugin extends Plugin {
 		members: { rawName: string; rawFilePath: string }[],
 		gateway: LlmGateway | null,
 		onPhase: (phase: 'markitdown' | 'llm-image') => void,
+		picturesDirVaultPath: string,
+		picturesDirName: string,
 		isExternal = false,
 		onProgress?: OnProgress,
 	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
@@ -301,6 +367,14 @@ export default class FileDropPlugin extends Plugin {
 						// vault and external groups, so clean them up either way.
 						await this.cleanupMsgTempFiles(msgResult.attachments);
 						markdown = attParts.join('\n\n');
+					} else if (rawName.toLowerCase().endsWith('.pptx')) {
+						// Several decks can share one group note, so prefix each deck's
+						// pictures (file names + body refs) to avoid Picture19.jpg clashes.
+						const prefix = `${rawName.replace(/\W/g, '')}__`;
+						markdown = await this.convertPptxNote(
+							absolutePath, gateway, onPhase, onProgress,
+							picturesDirVaultPath, picturesDirName, prefix,
+						);
 					} else {
 						markdown = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 					}
@@ -411,8 +485,10 @@ export default class FileDropPlugin extends Plugin {
 				members.push({ rawName, rawFilePath });
 			}
 
+			const groupPicturesDirName = `${noteName}_pictures`;
 			const converted = await this.convertGroupDir(
-				groupDirPath, groupDirName, monthSlug, category, members, gateway, onPhase, false, onProgress,
+				groupDirPath, groupDirName, monthSlug, category, members, gateway, onPhase,
+				normalizePath(`${subfolderPath}/${groupPicturesDirName}`), groupPicturesDirName, false, onProgress,
 			);
 			attachmentFrontmatterLines.push(...converted.attachmentFrontmatterLines);
 			const bodyParts = converted.bodyParts;
@@ -610,6 +686,7 @@ export default class FileDropPlugin extends Plugin {
 				file.name.toLowerCase().endsWith('.msg') ||
 				file.type === 'application/vnd.ms-outlook' ||
 				file.type === 'application/x-msg';
+			const isPptxFile = file.name.toLowerCase().endsWith('.pptx');
 			let markdownBody: string;
 			const attachmentFrontmatterLines: string[] = [];
 			let attachmentHadError = false;
@@ -640,6 +717,12 @@ export default class FileDropPlugin extends Plugin {
 				}
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				markdownBody = bodyParts.join('\n\n');
+			} else if (isPptxFile) {
+				const picturesDirName = `${noteNameFromFile(rawName)}_pictures`;
+				markdownBody = await this.convertPptxNote(
+					absolutePath, gateway, onPhase, onProgress,
+					normalizePath(`${subfolderPath}/${picturesDirName}`), picturesDirName,
+				);
 			} else {
 				markdownBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
@@ -755,6 +838,7 @@ export default class FileDropPlugin extends Plugin {
 			const isGroup = entry.filePath.endsWith('.group') && dirStat?.type === 'folder';
 
 			const isMsgFile = !isGroup && entry.filename.toLowerCase().endsWith('.msg');
+			const isPptxFile = !isGroup && entry.filename.toLowerCase().endsWith('.pptx');
 			let newBody: string;
 			let attachmentHadError = false;
 			let attachmentHadWarning = false;
@@ -769,8 +853,11 @@ export default class FileDropPlugin extends Plugin {
 				const members = listing.files
 					.filter((p) => !p.toLowerCase().endsWith('.md'))
 					.map((p) => ({ rawName: p.split('/').pop() as string, rawFilePath: p }));
+				const groupNoteDir = pathDirname(entry.notePath);
+				const groupPicturesDirName = `${pathBasename(entry.notePath).replace(/\.md$/i, '')}_pictures`;
 				const converted = await this.convertGroupDir(
-					entry.filePath, groupDirName, monthSlug, category, members, gateway, onPhase, false, onProgress,
+					entry.filePath, groupDirName, monthSlug, category, members, gateway, onPhase,
+					normalizePath(`${groupNoteDir}/${groupPicturesDirName}`), groupPicturesDirName, false, onProgress,
 				);
 				newBody = converted.bodyParts.join('\n\n---\n\n');
 				attachmentHadError = converted.anyError;
@@ -811,6 +898,14 @@ export default class FileDropPlugin extends Plugin {
 				}
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				newBody = bodyParts.join('\n\n');
+			} else if (isPptxFile) {
+				// Dir alongside the note (self-healing — re-extracts into it).
+				const noteDir = pathDirname(entry.notePath);
+				const picturesDirName = `${pathBasename(entry.notePath).replace(/\.md$/i, '')}_pictures`;
+				newBody = await this.convertPptxNote(
+					absolutePath, gateway, onPhase, onProgress,
+					normalizePath(`${noteDir}/${picturesDirName}`), picturesDirName,
+				);
 			} else {
 				newBody = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
@@ -1022,6 +1117,7 @@ export default class FileDropPlugin extends Plugin {
 
 		try {
 			const isMsgFile = baseName.toLowerCase().endsWith('.msg');
+			const isPptxFile = baseName.toLowerCase().endsWith('.pptx');
 			let body: string;
 			let attachmentHadError = false;
 			let attachmentHadWarning = false;
@@ -1036,6 +1132,13 @@ export default class FileDropPlugin extends Plugin {
 					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
 				}
 				body = parts.join('\n\n');
+			} else if (isPptxFile) {
+				const noteDir = pathDirname(notePath);
+				const picturesDirName = `${pathBasename(notePath).replace(/\.md$/i, '')}_pictures`;
+				body = await this.convertPptxNote(
+					absPath, gateway, onPhase, onProgress,
+					normalizePath(`${noteDir}/${picturesDirName}`), picturesDirName,
+				);
 			} else {
 				body = await runMarkitdown(absPath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
 			}
@@ -1118,7 +1221,11 @@ export default class FileDropPlugin extends Plugin {
 		};
 
 		try {
-			const converted = await this.convertGroupDir(absDir, baseName, '', 'external', members, gateway, onPhase, true, onProgress);
+			const groupPicturesDirName = `${noteNameFromFile(baseName)}_pictures`;
+			const converted = await this.convertGroupDir(
+				absDir, baseName, '', 'external', members, gateway, onPhase,
+				normalizePath(`${this.settings.incomingDir}/${groupPicturesDirName}`), groupPicturesDirName, true, onProgress,
+			);
 			const combinedBody = converted.bodyParts.join('\n\n---\n\n');
 
 			entry.pageProgress = undefined;

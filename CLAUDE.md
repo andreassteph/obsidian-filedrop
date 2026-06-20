@@ -17,9 +17,9 @@ vision/OCR LLM calls embedded in it.
 
 ### TypeScript (`main.ts` + `src/`)
 
-- `main.ts` — plugin entry point (`onload`). `processDroppedFile()` handles a dropped file end to end; `rerunConversion()` re-converts with a different LLM gateway. `scanExternalFolder()` scans a configured **external** (outside-vault) folder: top-level files become linked notes flat under `incomingDir` (raw files left in place, referenced via a `file://` link + `external: true`/`source-path` frontmatter), top-level subfolders become group notes (recursive, capped by `externalGroupFileLimit`); re-imports only when a size+mtime signature changed. Wires commands, ribbon icon, settings tab, and the drop handler.
-- `src/convert.ts` — **markitdown orchestration.** `runMarkitdown()` invokes (via `execFile`) either the `markitdown` CLI or the Python conversion script; `runMsgConversion()` handles `.msg`; `checkMarkitdownCli()`, `checkPythonEnv()`, and `installPythonRequirements()` manage the Python environment. Passes the active gateway's config + detected capabilities to Python as env vars.
-- `src/settings.ts` — settings schema **and the shared TS LLM layer.** `LlmGateway`, `LLM_PROVIDERS`, `FileDropSettings` (incl. `referenceGroups`). `ModelCapabilities` + `getCapabilities()` describe per-model quirks; `callChat()` is the **single low-level chat-completions client** all TS LLM calls route through — it builds the request via `buildChatBody()`, and on a parameter error flips the offending capability (`detectCapabilityFix()`), persists it, and retries. High-level helpers: `suggestTags()`, `summarizeContent()`, `reviseSummary()`. `probeModel()` powers the settings "Check" button (detects capabilities). Plus `fetchModelsForGateway()`, `stripThinking()`, the `LlmResult<T>`/`LlmOpError` result types, and gateway URL-security helpers (`isGatewayUrlSecure()`).
+- `main.ts` — plugin entry point (`onload`). `processDroppedFile()` handles a dropped file end to end; `rerunConversion()` re-converts with a different LLM gateway. `convertPptxNote()` is the shared `.pptx` path used by every conversion flow: it extracts embedded images into a sibling `<note>_pictures/` folder (`writeBinaryFromTemp` from the Python temp dir), reflows the slides via `structurePptxSlides()`, then `rewriteImageLinks()` points the body's `![](…)` links at that folder. `scanExternalFolder()` scans a configured **external** (outside-vault) folder: top-level files become linked notes flat under `incomingDir` (raw files left in place, referenced via a `file://` link + `external: true`/`source-path` frontmatter), top-level subfolders become group notes (recursive, capped by `externalGroupFileLimit`); re-imports only when a size+mtime signature changed. Wires commands, ribbon icon, settings tab, and the drop handler.
+- `src/convert.ts` — **markitdown orchestration.** `runMarkitdown()` invokes (via `execFile`) either the `markitdown` CLI or the Python conversion script; `runMsgConversion()` handles `.msg`; `convertPptx()` runs the Python `--pptx` structure-aware extractor (returns per-slide `SlideDoc[]` + extracted `PictureFile[]`, or `null` to fall back to `runMarkitdown`); `checkMarkitdownCli()`, `checkPythonEnv()`, and `installPythonRequirements()` manage the Python environment. Passes the active gateway's config + detected capabilities to Python as env vars.
+- `src/settings.ts` — settings schema **and the shared TS LLM layer.** `LlmGateway`, `LLM_PROVIDERS`, `FileDropSettings` (incl. `referenceGroups`). `ModelCapabilities` + `getCapabilities()` describe per-model quirks; `callChat()` is the **single low-level chat-completions client** all TS LLM calls route through — it builds the request via `buildChatBody()`, and on a parameter error flips the offending capability (`detectCapabilityFix()`), persists it, and retries. High-level helpers: `suggestTags()`, `summarizeContent()`, `reviseSummary()`, `structurePptxSlides()` (reflow extracted PPTX slides into reading-ordered markdown using shape geometry; `renderSlidesPlain()` is the no-LLM fallback). `probeModel()` powers the settings "Check" button (detects capabilities). Plus `fetchModelsForGateway()`, `stripThinking()`, the `LlmResult<T>`/`LlmOpError` result types, the `SlideDoc`/`SlideElement` types, and gateway URL-security helpers (`isGatewayUrlSecure()`).
 - `src/references.ts` — **note-reference engine (LLM-heavy).** `findCandidateNotes()` filters vault notes by frontmatter condition groups (no LLM); `extractActivityMetadata()` parses date/type/people via regex; then three `callChat`-backed helpers — `fillMetadataWithLLM()` (fill in missing date/type/people), `matchCandidatesWithLLM()` (rank which existing notes a document belongs with), `generateTodoTask()` (produce an Obsidian Tasks line). Also the render/insert helpers (`renderReferenceBlock()`, `insertReferenceIntoNote()`, `insertTaskIntoNote()`, `normalizeTaskLine()`).
 - `src/reference-modal.ts` — `ReferenceModal`, the UI that confirms matched notes and writes reference blocks / generated todos into them.
 - `src/settings-tab.ts` — settings UI panel (LLM gateway config, model dropdown, "Check" probe, reference groups).
@@ -28,13 +28,13 @@ vision/OCR LLM calls embedded in it.
 
 ### Python (`python/`)
 
-- `python/filedrop_convert.py` — **core markitdown + LLM conversion.** `build_converter()` instantiates `MarkItDown` with an optional OpenAI client; `convert()` runs the conversion; `_convert_pdf_pages_with_llm()` does page-by-page OCR for scanned PDFs; `_convert_without_llm()` is the text-only fallback; `describe()` guesses unsupported file types. Honors capability env vars (`_token_kwargs`, `_vision_enabled`, `_temperature_kwargs`, `_llm_timeout`).
+- `python/filedrop_convert.py` — **core markitdown + LLM conversion.** `build_converter()` instantiates `MarkItDown` with an optional OpenAI client; `convert()` runs the conversion; `_convert_pdf_pages_with_llm()` does page-by-page OCR for scanned PDFs; `_convert_without_llm()` is the text-only fallback; `describe()` guesses unsupported file types. `convert_pptx_structured()` (the `--pptx` mode) bypasses markitdown for `.pptx`: it reads the deck with `python-pptx`, emits per-slide JSON of shapes-with-geometry, writes each embedded picture's bytes to a temp dir under markitdown's `re.sub(r"\W","",shape.name)+".jpg"` name, and (when vision is enabled) describes each image via the LLM (`_describe_image`, reusing the PDF-page 413 guard). Honors capability env vars (`_token_kwargs`, `_vision_enabled`, `_temperature_kwargs`, `_llm_timeout`).
 - `python/filedrop_msg.py` — Outlook `.msg` extraction with attachments, reusing the same markitdown + LLM PDF fallback (helpers duplicated here so it stays self-contained).
 - `python/manual_convert.py` — standalone interactive CLI wrapper around `filedrop_convert.py` (prompts for LLM config + file path); for manual testing outside Obsidian.
 
 ## How conversion & LLM wiring works
 
-- Drop → `main.ts:processDroppedFile()` → `src/convert.ts:runMarkitdown()` (or `runMsgConversion()` for `.msg`) → Python script → markitdown.
+- Drop → `main.ts:processDroppedFile()` → `src/convert.ts:runMarkitdown()` (or `runMsgConversion()` for `.msg`, or `main.ts:convertPptxNote()` → `convertPptx()` for `.pptx`) → Python script → markitdown.
 - markitdown is reachable two ways: the `markitdown` CLI on `PATH`, or the Python package invoked through `python/filedrop_convert.py`.
 
 ### Where LLMs are called
@@ -48,6 +48,7 @@ vision/OCR LLM calls embedded in it.
 5. `fillMetadataWithLLM()` — extract missing date/type/people (`references.ts`)
 6. `matchCandidatesWithLLM()` — rank related notes for a dropped document (`references.ts`)
 7. `generateTodoTask()` — generate an Obsidian Tasks line (`references.ts`)
+8. `structurePptxSlides()` — reflow extracted PPTX slides (shape geometry + text + image refs) into reading-ordered markdown (`settings.ts`)
 
    `callChat()` centralizes auth, capability-aware body building, and the
    self-correcting retry; helpers return a typed `LlmResult<T>` (callers check
@@ -59,11 +60,12 @@ vision/OCR LLM calls embedded in it.
 2. Scanned-PDF page OCR (`_convert_pdf_pages_with_llm`)
 3. `.msg` attachment PDF fallback (`filedrop_msg.py`)
 4. `describe()` — best-effort guess for unsupported file types
+5. PPTX embedded-image descriptions (`_describe_image`, via `convert_pptx_structured`)
 
 ### TS → Python LLM config (env vars)
 
-`runMarkitdown()` / `runMsgConversion()` / the describe path pass the active
-gateway and its detected capabilities to Python:
+`runMarkitdown()` / `runMsgConversion()` / `convertPptx()` / the describe path
+pass the active gateway and its detected capabilities to Python:
 
 - `FILEDROP_LLM_URL`, `FILEDROP_LLM_KEY`, `FILEDROP_LLM_MODEL`, `FILEDROP_LLM_PROMPT`
 - `FILEDROP_LLM_TOKEN_PARAM` — `max_tokens` / `max_completion_tokens` / `none`

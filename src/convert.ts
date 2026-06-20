@@ -2,7 +2,7 @@ import { Notice } from 'obsidian';
 
 import convertScript from '../python/filedrop_convert.py';
 import msgScript from '../python/filedrop_msg.py';
-import { LlmGateway, getCapabilities, isGatewayEnabled, isGatewayUrlSecure } from './settings';
+import { LlmGateway, SlideDoc, getCapabilities, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
@@ -218,6 +218,38 @@ function getPageCount(absolutePath: string, pythonCommand: string): Promise<numb
 			if (error) { resolve(null); return; }
 			const n = parseInt(stdout.trim(), 10);
 			resolve(isNaN(n) ? null : n);
+		});
+	});
+}
+
+// Count a .pptx's slides and embedded pictures up front (no blob reads) so the
+// PPTX subprocess timeout can be sized by the actual LLM workload — which is one
+// vision call per image, not per slide. Picture detection mirrors the extractor
+// (try shape.image, recurse groups) so placeholder images are counted too.
+function getPptxCounts(absolutePath: string, pythonCommand: string): Promise<{ slides: number; images: number } | null> {
+	if (!absolutePath.toLowerCase().endsWith('.pptx')) return Promise.resolve(null);
+	const script =
+		'import sys\n' +
+		'from pptx import Presentation\n' +
+		'def count(shapes):\n' +
+		'    n = 0\n' +
+		'    for s in shapes:\n' +
+		'        if getattr(s, "shape_type", None) == 6 and hasattr(s, "shapes"):\n' +
+		'            n += count(s.shapes)\n' +
+		'        else:\n' +
+		'            try:\n' +
+		'                _ = s.image; n += 1\n' +
+		'            except Exception:\n' +
+		'                pass\n' +
+		'    return n\n' +
+		'p = Presentation(sys.argv[1])\n' +
+		'slides = list(p.slides)\n' +
+		'print(f"{len(slides)} {sum(count(sl.shapes) for sl in slides)}")\n';
+	return new Promise((resolve) => {
+		execFile(pythonCommand, ['-c', script, absolutePath], { timeout: 15_000 }, (error: Error | null, stdout: string) => {
+			if (error) { resolve(null); return; }
+			const [s, i] = stdout.trim().split(/\s+/).map((n) => parseInt(n, 10));
+			resolve(isNaN(s) ? null : { slides: s, images: isNaN(i) ? 0 : i });
 		});
 	});
 }
@@ -511,6 +543,92 @@ export async function runMsgConversion(
 						),
 						attachments: [],
 					});
+				}
+			},
+			onProgress,
+		);
+	});
+}
+
+export interface PictureFile {
+	filename: string;
+	// Absolute path to the extracted image bytes in a temp dir created by the
+	// Python helper. The TS consumer copies it into the vault then deletes the
+	// dir — same temp-file handoff as MsgAttachment.
+	tempPath: string;
+}
+
+export interface PptxStructuredResult {
+	slides: SlideDoc[];
+	pictures: PictureFile[];
+}
+
+// Extract a .pptx into structured per-slide data plus its embedded images via
+// python/filedrop_convert.py (--pptx mode). Returns null when the structured
+// path is unavailable (python-pptx missing, deck unreadable, or any failure) so
+// the caller falls back to runMarkitdown. Image extraction runs even without a
+// gateway; LLM image descriptions are added only when a secure gateway is set.
+export async function convertPptx(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
+	onProgress?: OnProgress,
+): Promise<PptxStructuredResult | null> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting PPTX without LLM.');
+	}
+	const useGateway = !!gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
+
+	const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUTF8: '1' };
+	let timeout = MARKITDOWN_TIMEOUT_MS;
+	if (useGateway && gateway) {
+		env.FILEDROP_LLM_URL = gateway.baseUrl;
+		env.FILEDROP_LLM_KEY = gateway.apiKey;
+		env.FILEDROP_LLM_MODEL = gateway.model;
+		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+		env.FILEDROP_LLM_TOKEN_PARAM = getCapabilities(gateway).tokenParam;
+		env.FILEDROP_LLM_VISION = getCapabilities(gateway).vision !== false ? '1' : '0';
+		env.FILEDROP_LLM_TEMPERATURE = getCapabilities(gateway).temperature !== false ? '1' : '0';
+		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
+		// LLM work is one vision call per image (4-way parallel in Python), so size
+		// the budget by whichever is larger: slide count or images/4.
+		const counts = await getPptxCounts(absolutePath, pythonCommand);
+		const driver = counts != null ? Math.max(counts.slides, Math.ceil(counts.images / 4)) : null;
+		timeout = driver != null
+			? Math.max(LLM_TIMEOUT_MS, driver * LLM_TIMEOUT_PER_PAGE_MS)
+			: LLM_TIMEOUT_MS;
+	}
+
+	return new Promise((resolve) => {
+		runWithPhases(
+			pythonCommand,
+			['-c', convertScript, '--pptx', absolutePath],
+			{ timeout, maxBuffer: 200 * 1024 * 1024, env },
+			onPhase,
+			(error, stdout, stderr) => {
+				if (error) {
+					console.error('FileDrop convertPptx failed:', subprocessErrorDetail(error, stderr, stdout, timeout));
+					resolve(null);
+					return;
+				}
+				// Empty stdout is the Python helper's signal to fall back to markitdown.
+				if (!stdout.trim()) {
+					resolve(null);
+					return;
+				}
+				try {
+					const parsed = JSON.parse(stdout) as {
+						slides: SlideDoc[];
+						pictures: Array<{ filename: string; path: string }>;
+					};
+					resolve({
+						slides: parsed.slides ?? [],
+						pictures: (parsed.pictures ?? []).map((p) => ({ filename: p.filename, tempPath: p.path })),
+					});
+				} catch (e) {
+					console.error('FileDrop convertPptx: could not parse output as JSON:', e);
+					resolve(null);
 				}
 			},
 			onProgress,

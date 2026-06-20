@@ -897,3 +897,193 @@ export async function reviseSummary(
 	if (summary.length === 0) return { ok: false, reason: 'no-reply' };
 	return { ok: true, value: summary };
 }
+
+// ---------------------------------------------------------------------------
+// Structure-aware PPTX reflow
+//
+// python/filedrop_convert.py (--pptx mode) emits one of these per slide: each
+// shape with its geometry (so we can reconstruct columns / reading order) plus
+// extracted-picture references and any LLM image descriptions. The TS side here
+// turns that into clean Markdown via the LLM, falling back to a deterministic
+// geometry-ordered render when no gateway is available.
+// ---------------------------------------------------------------------------
+
+export interface SlideGeom {
+	left: number | null;
+	top: number | null;
+	width: number | null;
+	height: number | null;
+}
+
+export type SlideElement =
+	| { type: 'text'; geom: SlideGeom; paragraphs: { text: string; level: number }[] }
+	| { type: 'table'; geom: SlideGeom; markdown: string }
+	| { type: 'chart'; geom: SlideGeom; title: string; markdown: string }
+	| { type: 'picture'; geom: SlideGeom; filename: string; description: string };
+
+export interface SlideDoc {
+	index: number;
+	elements: SlideElement[];
+	notes?: string;
+}
+
+const PPTX_STRUCTURE_TIMEOUT_MS = 180_000; // reasoning models can be slow on big decks
+const EMU_PER_INCH = 914400;
+// Shapes whose tops differ by less than this are treated as the same horizontal
+// band (a row of columns) so they read left-to-right rather than purely top-down.
+const EMU_ROW_BAND = EMU_PER_INCH / 2;
+
+function emuToInch(v: number | null): string {
+	return v == null ? '?' : (v / EMU_PER_INCH).toFixed(2);
+}
+
+function slidesToPrompt(slides: SlideDoc[]): string {
+	const parts: string[] = [];
+	for (const slide of slides) {
+		parts.push(`### Slide ${slide.index}`);
+		for (const el of slide.elements) {
+			const g = el.geom;
+			const pos = `[x=${emuToInch(g.left)}in y=${emuToInch(g.top)}in w=${emuToInch(g.width)}in h=${emuToInch(g.height)}in]`;
+			if (el.type === 'text') {
+				const text = el.paragraphs
+					.map((p) => `${'  '.repeat(Math.max(0, p.level))}${p.text}`)
+					.join('\n');
+				parts.push(`TEXTBOX ${pos}\n${text}`);
+			} else if (el.type === 'table') {
+				parts.push(`TABLE ${pos}\n${el.markdown}`);
+			} else if (el.type === 'chart') {
+				parts.push(`CHART ${pos}${el.title ? ` title="${el.title}"` : ''}\n${el.markdown}`);
+			} else {
+				parts.push(`IMAGE ${pos} ref=${el.filename}${el.description ? ` description="${el.description}"` : ''}`);
+			}
+		}
+		if (slide.notes) parts.push(`NOTES\n${slide.notes}`);
+	}
+	return parts.join('\n\n');
+}
+
+const PPTX_BATCH_MAX_SLIDES = 8;
+const PPTX_BATCH_MAX_CHARS = 12000;
+
+// Split a deck into batches small enough that each reflow response stays well
+// under the token cap (avoids silently truncating later slides on big decks).
+function batchSlides(slides: SlideDoc[]): SlideDoc[][] {
+	const batches: SlideDoc[][] = [];
+	let current: SlideDoc[] = [];
+	let chars = 0;
+	for (const slide of slides) {
+		const size = slidesToPrompt([slide]).length;
+		if (current.length > 0 && (current.length >= PPTX_BATCH_MAX_SLIDES || chars + size > PPTX_BATCH_MAX_CHARS)) {
+			batches.push(current);
+			current = [];
+			chars = 0;
+		}
+		current.push(slide);
+		chars += size;
+	}
+	if (current.length) batches.push(current);
+	return batches;
+}
+
+const PPTX_REFLOW_SYSTEM =
+	'You convert a PowerPoint deck into clean, readable Markdown. ' +
+	"You are given each slide's shapes with their positions in inches (x/y is the top-left corner, w/h is the size). " +
+	'Infer the correct reading order from the geometry: top-to-bottom, and for shapes positioned side by side, left-to-right as columns. ' +
+	'Render each slide under a "## Slide N" heading (use the slide number given). ' +
+	'Preserve bullet indentation, keep tables as Markdown tables, and keep the text faithful — do not summarize, drop, or invent content. ' +
+	'For CHART elements, render the provided data as a Markdown table and add a one-sentence summary of the trend it shows. ' +
+	"If a slide has NOTES, render them under a '### Notes' subheading after that slide's content. " +
+	'Emit every image exactly as ![description](ref), using the given ref filename verbatim and unmodified — no folder and no path. ' +
+	'Return ONLY the Markdown, with no preamble and no code fences.';
+
+// Reflow one batch of slides via the LLM. Returns the cleaned Markdown.
+async function reflowBatch(
+	gateway: LlmGateway,
+	slides: SlideDoc[],
+	persist?: () => Promise<void>
+): Promise<LlmResult<string>> {
+	const result = await callChat(
+		gateway,
+		{
+			label: 'structurePptx',
+			messages: [
+				{ role: 'system', content: PPTX_REFLOW_SYSTEM },
+				{ role: 'user', content: slidesToPrompt(slides) },
+			],
+			maxTokens: 8000,
+			temperature: 0,
+			timeoutMs: PPTX_STRUCTURE_TIMEOUT_MS,
+		},
+		persist
+	);
+	if (!result.ok) return result;
+	const body = stripThinking(result.value)
+		.replace(/^```(?:\w+)?\s*/i, '')
+		.replace(/\s*```$/i, '')
+		.trim();
+	if (body.length === 0) return { ok: false, reason: 'no-reply' };
+	return { ok: true, value: body };
+}
+
+// Reflow extracted slide elements into clean Markdown, using shape geometry so
+// multi-column layouts read in the right order. Large decks are processed in
+// batches so no response truncates; a batch that fails falls back to the
+// deterministic renderSlidesPlain for its slides, so content is never lost.
+// Returns !ok only when there are no slides or every batch failed — the caller
+// then renders the whole deck with renderSlidesPlain.
+export async function structurePptxSlides(
+	slides: SlideDoc[],
+	gateway: LlmGateway | null,
+	persist?: () => Promise<void>
+): Promise<LlmResult<string>> {
+	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
+	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
+	if (slides.length === 0) return { ok: false, reason: 'empty-content', detail: 'no slides' };
+
+	const rendered: string[] = [];
+	let anyOk = false;
+	for (const batch of batchSlides(slides)) {
+		const res = await reflowBatch(gateway, batch, persist);
+		if (res.ok) {
+			rendered.push(res.value);
+			anyOk = true;
+		} else {
+			rendered.push(renderSlidesPlain(batch));
+		}
+	}
+	if (!anyOk) return { ok: false, reason: 'no-reply', detail: 'all reflow batches failed' };
+	return { ok: true, value: rendered.join('\n\n') };
+}
+
+// Deterministic fallback when no gateway is configured (or the reflow call
+// fails): order each slide's shapes by geometry and render them as plain
+// Markdown, so the note still has all the content and working image embeds.
+export function renderSlidesPlain(slides: SlideDoc[]): string {
+	const out: string[] = [];
+	for (const slide of slides) {
+		out.push(`## Slide ${slide.index}`);
+		const ordered = [...slide.elements].sort((a, b) => {
+			const at = a.geom.top ?? 0;
+			const bt = b.geom.top ?? 0;
+			if (Math.abs(at - bt) > EMU_ROW_BAND) return at - bt;
+			return (a.geom.left ?? 0) - (b.geom.left ?? 0);
+		});
+		for (const el of ordered) {
+			if (el.type === 'text') {
+				out.push(
+					el.paragraphs
+						.map((p) => (p.level > 0 ? `${'    '.repeat(p.level - 1)}- ${p.text}` : p.text))
+						.join('\n')
+				);
+			} else if (el.type === 'table') {
+				out.push(el.markdown);
+			} else if (el.type === 'chart') {
+				out.push((el.title ? `**${el.title}**\n\n` : '') + el.markdown);
+			} else {
+				out.push(`![${el.description}](${el.filename})`);
+			}
+		}
+		if (slide.notes) out.push(`### Notes\n\n${slide.notes}`);
+	}
+	return out.join('\n\n');
+}

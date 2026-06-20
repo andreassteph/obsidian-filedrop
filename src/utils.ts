@@ -93,6 +93,24 @@ export function sanitizeFilename(name: string, fallback: string): string {
 	return cleaned.length > 0 ? cleaned : fallback;
 }
 
+// Prefix a subfolder onto the bare image references the PPTX structure step
+// emits (`![desc](Picture19.jpg)`), so they point at `<dir>/Picture19.jpg` where
+// the extracted pictures were copied. We match only on the link *target* against
+// the known `filenames` (never the alt text), so an LLM-written description that
+// contains `]` or `)` can't break the rewrite. The new destination is run
+// through encodeURI so a `dirName` containing spaces (note names can) stays a
+// valid markdown URL; encodeURI preserves `/`.
+export function rewriteImageLinks(markdown: string, dirName: string, filenames: Iterable<string>): string {
+	// Longest first so one filename that is a prefix of another can't shadow it.
+	const names = [...new Set(filenames)].filter(Boolean).sort((a, b) => b.length - a.length);
+	if (names.length === 0) return markdown;
+	const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	// Match `](<name>)` (the link target only), tolerating optional angle
+	// brackets and surrounding whitespace the model might add.
+	const re = new RegExp(`\\]\\(\\s*<?\\s*(${names.map(escapeRegExp).join('|')})\\s*>?\\s*\\)`, 'g');
+	return markdown.replace(re, (_m, name: string) => `](${encodeURI(`${dirName}/${name}`)})`);
+}
+
 // Rewrite the frontmatter `tags` field to an inline JSON array of quoted strings,
 // e.g. `tags: ["a","b"]`. Obsidian's Properties editor re-serializes tags as a
 // multi-line YAML block list (`tags:\n  - a\n  - b`); we match that whole block —
