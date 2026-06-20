@@ -41,6 +41,37 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		new Setting(containerEl).setName('External linked folder').setHeading();
+
+		new Setting(containerEl)
+			.setName('External folder')
+			.setDesc('Absolute path to a folder outside the vault. On scan, its top-level files become linked notes under the incoming directory and its top-level subfolders become group notes. Leave empty to disable.')
+			.addText((text) =>
+				text
+					.setPlaceholder('e.g. F:/OneDrive')
+					.setValue(this.plugin.settings.externalFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.externalFolder = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName('Group file limit')
+			.setDesc('Maximum number of files (scanned recursively) a top-level subfolder may contain to be imported as a group. Larger folders are skipped with a warning.')
+			.addText((text) =>
+				text
+					.setPlaceholder(String(DEFAULT_SETTINGS.externalGroupFileLimit))
+					.setValue(String(this.plugin.settings.externalGroupFileLimit))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!isNaN(n) && n > 0) {
+							this.plugin.settings.externalGroupFileLimit = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
 		new Setting(containerEl)
 			.setName('Categories')
 			.setDesc('Comma-separated category subfolders shown in the sidebar dropdown.')

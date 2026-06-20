@@ -22,14 +22,23 @@ import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { join: pathJoin, dirname: pathDirname } = require('path') as typeof import('path');
+const { join: pathJoin, dirname: pathDirname, basename: pathBasename } = require('path') as typeof import('path');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { createHash } = require('crypto') as typeof import('crypto');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const fsp = require('fs').promises as typeof import('fs').promises;
+const fs = require('fs') as typeof import('fs');
 
 const sha256 = (buf: ArrayBuffer): string =>
 	createHash('sha256').update(Buffer.from(buf)).digest('hex');
+
+// Build a clickable file:// URL for a raw file that lives outside the vault.
+// Backslashes are normalized to forward slashes so Windows paths work, and the
+// path is prefixed with a leading slash to yield the file:///<path> form.
+const externalFileUrl = (absPath: string): string => {
+	const normalized = absPath.replace(/\\/g, '/');
+	const withSlash = normalized.startsWith('/') ? normalized : `/${normalized}`;
+	return `file://${encodeURI(withSlash)}`;
+};
 
 export default class FileDropPlugin extends Plugin {
 	settings: FileDropSettings;
@@ -65,6 +74,11 @@ export default class FileDropPlugin extends Plugin {
 			id: 'open-filedrop',
 			name: 'Open FileDrop sidebar',
 			callback: () => this.activateView(),
+		});
+		this.addCommand({
+			id: 'filedrop-scan-external',
+			name: 'Scan external folder',
+			callback: () => this.scanExternalFolder(this.getActiveView()?.selectedGatewayId ?? null),
 		});
 		this.addSettingTab(new FileDropSettingTab(this.app, this));
 		this.app.workspace.onLayoutReady(() => this.syncIncomingFolder());
@@ -175,7 +189,7 @@ export default class FileDropPlugin extends Plugin {
 	// the vault at destPath. The Python helper writes attachment bytes to temp
 	// files (not base64 on stdout) to avoid inflation; we stream them in here.
 	private async writeMsgAttachment(att: MsgAttachment, destPath: string): Promise<void> {
-		const data = await fsp.readFile(att.tempPath);
+		const data = await fs.promises.readFile(att.tempPath);
 		const ab = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 		await this.app.vault.adapter.writeBinary(destPath, ab);
 	}
@@ -190,7 +204,7 @@ export default class FileDropPlugin extends Plugin {
 		}
 		for (const dir of dirs) {
 			try {
-				await fsp.rm(dir, { recursive: true, force: true });
+				await fs.promises.rm(dir, { recursive: true, force: true });
 			} catch {
 				/* best-effort cleanup */
 			}
@@ -221,6 +235,7 @@ export default class FileDropPlugin extends Plugin {
 		members: { rawName: string; rawFilePath: string }[],
 		gateway: LlmGateway | null,
 		onPhase: (phase: 'markitdown' | 'llm-image') => void,
+		isExternal = false,
 	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
 		const { vault } = this.app;
 		const basePath: string | undefined = (vault.adapter as any).basePath;
@@ -241,7 +256,9 @@ export default class FileDropPlugin extends Plugin {
 			members,
 			this.settings.groupConcurrency,
 			async ({ rawName, rawFilePath }) => {
-				const absolutePath = basePath ? pathJoin(basePath, rawFilePath) : rawFilePath;
+				// External members carry an absolute path already; vault members are
+				// vault-relative and must be resolved against the vault base path.
+				const absolutePath = isExternal ? rawFilePath : (basePath ? pathJoin(basePath, rawFilePath) : rawFilePath);
 				const isMsgFile = rawName.toLowerCase().endsWith('.msg');
 				const attLines: string[] = [];
 				let err = false;
@@ -256,23 +273,31 @@ export default class FileDropPlugin extends Plugin {
 						// vault.adapter.list() is non-recursive, this keeps them out of
 						// the member listing on rerun (no duplicate sections) and avoids
 						// filename collisions between attachments of different emails.
+						// For external groups there is no vault group dir, so attachment
+						// markdown is inlined without writing files or wikilinks.
 						const attDirName = `${rawName}.attachments`;
-						if (msgResult.attachments.length > 0) {
+						if (!isExternal && msgResult.attachments.length > 0) {
 							await this.ensureDir(normalizePath(`${groupDirPath}/${attDirName}`));
 						}
 						const attParts: string[] = [msgResult.body];
 						for (const att of msgResult.attachments) {
 							if (!att.markdown) continue;
-							const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
-							await this.writeMsgAttachment(att, attPath);
-							attLines.push(
-								`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
-							);
-							const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
-							attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
+							if (isExternal) {
+								attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+							} else {
+								const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
+								await this.writeMsgAttachment(att, attPath);
+								attLines.push(
+									`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
+								);
+								const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
+								attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
+							}
 							if (hasErrorCallout(att.markdown)) err = true;
 							else if (hasWarningCallout(att.markdown)) warn = true;
 						}
+						// The Python side writes attachment bytes to temp files for both
+						// vault and external groups, so clean them up either way.
 						await this.cleanupMsgTempFiles(msgResult.attachments);
 						markdown = attParts.join('\n\n');
 					} else {
@@ -668,6 +693,31 @@ export default class FileDropPlugin extends Plugin {
 	async rerunConversion(entry: DroppedFile, gatewayId: string | null): Promise<void> {
 		const { vault } = this.app;
 
+		// External entries live outside the vault and cannot be read through the
+		// vault adapter — re-import them via the external pipeline instead.
+		if (entry.external && entry.sourcePath) {
+			const gateway = gatewayId
+				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+				: null;
+			// A manual re-run must convert regardless of whether the source
+			// changed, so drop the stored signature to bypass the skip check.
+			entry.sourceSignature = undefined;
+			try {
+				const stat = await fs.promises.stat(entry.sourcePath);
+				if (stat.isDirectory()) {
+					await this.importExternalGroup(entry.sourcePath, gateway);
+				} else {
+					await this.importExternalFile(entry.sourcePath, gateway);
+				}
+			} catch (e) {
+				entry.status = 'error';
+				new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+			}
+			await this.saveSettings();
+			this.getActiveView()?.renderFileList();
+			return;
+		}
+
 		entry.status = 'converting-markitdown';
 		this.getActiveView()?.renderFileList();
 
@@ -776,6 +826,296 @@ export default class FileDropPlugin extends Plugin {
 			await this.saveSettings();
 			this.getActiveView()?.renderFileList();
 			new Notice(`FileDrop: re-conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+		}
+	}
+
+	// ---- External linked folder --------------------------------------------
+
+	// Scan the configured external folder. Top-level files become linked notes
+	// (`incoming/<name>_<ext>.md`); top-level subfolders become group notes.
+	// Raw files are never copied into the vault — only referenced.
+	async scanExternalFolder(gatewayId: string | null = null): Promise<void> {
+		const external = this.settings.externalFolder.trim();
+		if (!external) {
+			new Notice('FileDrop: no external folder configured.');
+			return;
+		}
+
+		let topEntries: import('fs').Dirent[];
+		try {
+			topEntries = await fs.promises.readdir(external, { withFileTypes: true });
+		} catch (e) {
+			new Notice(`FileDrop: cannot read external folder — ${e instanceof Error ? e.message : String(e)}`);
+			return;
+		}
+
+		await this.ensureDir(normalizePath(this.settings.incomingDir));
+
+		const gateway = gatewayId
+			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
+			: null;
+
+		let added = 0;
+		let updated = 0;
+		let skipped = 0;
+		for (const dirent of topEntries) {
+			const absPath = pathJoin(external, dirent.name);
+			try {
+				const result = dirent.isDirectory()
+					? await this.importExternalGroup(absPath, gateway)
+					: dirent.isFile()
+						? await this.importExternalFile(absPath, gateway)
+						: 'skipped';
+				if (result === 'added') added++;
+				else if (result === 'updated') updated++;
+				else skipped++;
+			} catch (e) {
+				skipped++;
+				new Notice(`FileDrop: failed importing "${dirent.name}" — ${e instanceof Error ? e.message : String(e)}`);
+			}
+		}
+
+		this.recentFiles.sort((a, b) => b.droppedAt - a.droppedAt);
+		await this.saveSettings();
+		this.getActiveView()?.renderFileList();
+		new Notice(`FileDrop: external scan — ${added} added, ${updated} updated, ${skipped} unchanged/skipped.`);
+	}
+
+	// size+mtime fingerprint of one or more source paths, used to detect whether
+	// an external file/folder changed since its note was last generated.
+	private async computeSignature(absPaths: string[]): Promise<string> {
+		const parts: string[] = [];
+		for (const p of absPaths) {
+			const st = await fs.promises.stat(p);
+			parts.push(`${p}|${st.size}|${st.mtimeMs}`);
+		}
+		return createHash('sha256').update(parts.join('\n')).digest('hex');
+	}
+
+	// Depth-first list of files under `dir` (recursive). Short-circuits as soon
+	// as more than `limit` files are seen so huge trees are not fully walked;
+	// `overLimit` then signals the caller to skip the folder entirely. Member
+	// names are paths relative to `dir` so nested files stay distinguishable.
+	private async listGroupMembersRecursive(
+		dir: string,
+		limit: number,
+	): Promise<{ members: { rawName: string; rawFilePath: string }[]; overLimit: boolean }> {
+		const members: { rawName: string; rawFilePath: string }[] = [];
+		let overLimit = false;
+		const walk = async (current: string): Promise<void> => {
+			if (overLimit) return;
+			const entries = await fs.promises.readdir(current, { withFileTypes: true });
+			for (const e of entries) {
+				if (overLimit) return;
+				const full = pathJoin(current, e.name);
+				if (e.isDirectory()) {
+					await walk(full);
+				} else if (e.isFile()) {
+					if (members.length >= limit) { overLimit = true; return; }
+					const rawName = full.slice(dir.length + 1).replace(/\\/g, '/');
+					members.push({ rawName, rawFilePath: full });
+				}
+			}
+		};
+		await walk(dir);
+		return { members, overLimit };
+	}
+
+	// Build frontmatter for an external note. The raw file lives outside the
+	// vault, so `original-file` is a clickable file:// link rather than a vault
+	// wikilink, and `external`/`source-path` mark the entry for re-scans.
+	private buildExternalFrontmatter(displayName: string, absPath: string, tags: string[]): string {
+		return [
+			'---',
+			`original-file: "[${displayName}](${externalFileUrl(absPath)})"`,
+			'external: true',
+			`source-path: "${absPath.replace(/\\/g, '/')}"`,
+			'processed: false',
+			'verified: false',
+			`tags: ${JSON.stringify(tags)}`,
+			'---',
+		].join('\n');
+	}
+
+	// Write/refresh an external note's content while preserving any existing
+	// frontmatter (so verified/processed survive a re-scan); only the tags block
+	// and body are replaced. Returns whether the note already existed.
+	private async writeExternalNote(
+		notePath: string,
+		displayName: string,
+		sourcePath: string,
+		tags: string[],
+		body: string,
+	): Promise<boolean> {
+		const { vault } = this.app;
+		const existing = vault.getAbstractFileByPath(notePath);
+		if (existing instanceof TFile) {
+			const content = await vault.read(existing);
+			const closingIdx = content.indexOf('\n---\n');
+			const frontmatter = closingIdx >= 0
+				? replaceTagsBlock(content.slice(0, closingIdx + 5), tags)
+				: this.buildExternalFrontmatter(displayName, sourcePath, tags);
+			await vault.modify(existing, frontmatter + '\n' + body);
+			return true;
+		}
+		await vault.create(notePath, this.buildExternalFrontmatter(displayName, sourcePath, tags) + '\n' + body);
+		return false;
+	}
+
+	// Import a single top-level external file. Skips when the note exists and the
+	// source is unchanged. Returns 'added' | 'updated' | 'unchanged'.
+	private async importExternalFile(
+		absPath: string,
+		gateway: LlmGateway | null,
+	): Promise<'added' | 'updated' | 'unchanged'> {
+		const baseName = pathBasename(absPath);
+		const notePath = normalizePath(`${this.settings.incomingDir}/${noteNameFromFile(baseName)}.md`);
+		const signature = await this.computeSignature([absPath]);
+
+		const existing = this.recentFiles.find((e) => e.external && e.sourcePath === absPath);
+		const noteExists = await this.app.vault.adapter.exists(notePath);
+		if (noteExists && existing && existing.sourceSignature === signature) return 'unchanged';
+
+		const entry: DroppedFile = existing ?? {
+			filename: baseName,
+			filePath: absPath,
+			notePath,
+			tags: [],
+			category: 'external',
+			droppedAt: Date.now(),
+			verified: false,
+			external: true,
+			sourcePath: absPath,
+		};
+		if (!existing) {
+			this.recentFiles.unshift(entry);
+			if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
+		}
+		entry.notePath = notePath;
+		entry.status = 'converting-markitdown';
+		this.getActiveView()?.renderFileList();
+
+		const onPhase = (phase: 'markitdown' | 'llm-image') => {
+			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+			this.getActiveView()?.renderFileList();
+		};
+
+		try {
+			const isMsgFile = baseName.toLowerCase().endsWith('.msg');
+			let body: string;
+			let attachmentHadError = false;
+			let attachmentHadWarning = false;
+
+			if (isMsgFile) {
+				const msgResult = await runMsgConversion(absPath, this.settings.pythonCommand, gateway, onPhase);
+				const parts: string[] = [msgResult.body];
+				for (const att of msgResult.attachments) {
+					if (!att.markdown) continue;
+					parts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
+					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
+				}
+				body = parts.join('\n\n');
+			} else {
+				body = await runMarkitdown(absPath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions);
+			}
+
+			entry.status = 'converting-llm-tags';
+			this.getActiveView()?.renderFileList();
+
+			const tagResult = await suggestTags(body, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
+
+			const noteExisted = await this.writeExternalNote(notePath, baseName, absPath, mergedTags, body);
+
+			entry.tags = [...mergedTags];
+			entry.sourceSignature = signature;
+			entry.status = (hasErrorCallout(body) || attachmentHadError) ? 'error'
+				: (hasWarningCallout(body) || attachmentHadWarning) ? 'warning'
+				: 'converted';
+			this.getActiveView()?.renderFileList();
+			return noteExisted ? 'updated' : 'added';
+		} catch (e) {
+			entry.status = 'error';
+			this.getActiveView()?.renderFileList();
+			new Notice(`FileDrop: conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+			return existing ? 'updated' : 'added';
+		}
+	}
+
+	// Import a top-level external subfolder as a single group note. Folders with
+	// more than the configured limit are skipped with a warning. Skips when the
+	// note exists and the source is unchanged.
+	private async importExternalGroup(
+		absDir: string,
+		gateway: LlmGateway | null,
+	): Promise<'added' | 'updated' | 'unchanged' | 'skipped'> {
+		const baseName = pathBasename(absDir);
+		const limit = this.settings.externalGroupFileLimit;
+		const { members, overLimit } = await this.listGroupMembersRecursive(absDir, limit);
+		if (overLimit) {
+			new Notice(`FileDrop: skipped "${baseName}" — exceeds ${limit} files.`);
+			return 'skipped';
+		}
+		if (members.length === 0) return 'skipped';
+
+		const notePath = normalizePath(`${this.settings.incomingDir}/${noteNameFromFile(baseName)}.md`);
+		const signature = await this.computeSignature(members.map((m) => m.rawFilePath));
+
+		const existing = this.recentFiles.find((e) => e.external && e.sourcePath === absDir);
+		const noteExists = await this.app.vault.adapter.exists(notePath);
+		if (noteExists && existing && existing.sourceSignature === signature) return 'unchanged';
+
+		const friendlyName = `${baseName} (group, ${members.length} file${members.length !== 1 ? 's' : ''})`;
+		const entry: DroppedFile = existing ?? {
+			filename: friendlyName,
+			filePath: absDir,
+			notePath,
+			tags: [],
+			category: 'external',
+			droppedAt: Date.now(),
+			verified: false,
+			external: true,
+			sourcePath: absDir,
+		};
+		entry.filename = friendlyName;
+		entry.notePath = notePath;
+		if (!existing) {
+			this.recentFiles.unshift(entry);
+			if (this.recentFiles.length > MAX_RECENT_FILES) this.recentFiles.length = MAX_RECENT_FILES;
+		}
+		entry.status = 'converting-markitdown';
+		this.getActiveView()?.renderFileList();
+
+		const onPhase = (phase: 'markitdown' | 'llm-image') => {
+			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+			this.getActiveView()?.renderFileList();
+		};
+
+		try {
+			const converted = await this.convertGroupDir(absDir, baseName, '', 'external', members, gateway, onPhase, true);
+			const combinedBody = converted.bodyParts.join('\n\n---\n\n');
+
+			entry.status = 'converting-llm-tags';
+			this.getActiveView()?.renderFileList();
+
+			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
+			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
+
+			const noteExisted = await this.writeExternalNote(notePath, baseName, absDir, mergedTags, combinedBody);
+
+			entry.tags = [...mergedTags];
+			entry.sourceSignature = signature;
+			entry.status = (hasErrorCallout(combinedBody) || converted.anyError) ? 'error'
+				: (hasWarningCallout(combinedBody) || converted.anyWarning) ? 'warning'
+				: 'converted';
+			this.getActiveView()?.renderFileList();
+			return noteExisted ? 'updated' : 'added';
+		} catch (e) {
+			entry.status = 'error';
+			this.getActiveView()?.renderFileList();
+			new Notice(`FileDrop: conversion failed — ${e instanceof Error ? e.message : String(e)}`);
+			return existing ? 'updated' : 'added';
 		}
 	}
 
@@ -968,6 +1308,31 @@ export default class FileDropPlugin extends Plugin {
 			});
 			trackedNotePaths.add(file.path);
 			trackedFilePaths.add(filePath);
+			added++;
+		}
+
+		// Pick up external linked notes. Their `original-file` is a file:// link
+		// rather than a vault wikilink, so the index above misses them; re-derive
+		// the entry from `external`/`source-path` frontmatter so a later scan still
+		// recognizes the source. (Normally external entries persist in recentFiles;
+		// this recovers them if that data was lost.)
+		for (const file of vault.getMarkdownFiles().filter((f) => f.path.startsWith(incomingDir + '/'))) {
+			if (trackedNotePaths.has(file.path)) continue;
+			const fm = metadataCache.getFileCache(file)?.frontmatter;
+			if (!fm || fm.external !== true || typeof fm['source-path'] !== 'string') continue;
+
+			this.recentFiles.push({
+				filename: file.basename,
+				filePath: fm['source-path'],
+				notePath: file.path,
+				tags: Array.isArray(fm.tags) ? fm.tags : [],
+				category: 'external',
+				droppedAt: file.stat.ctime,
+				verified: fm.verified === true,
+				external: true,
+				sourcePath: fm['source-path'],
+			});
+			trackedNotePaths.add(file.path);
 			added++;
 		}
 
