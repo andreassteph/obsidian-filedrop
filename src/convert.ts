@@ -104,9 +104,10 @@ const PYTHON_LLM_TIMEOUT_S = 150;
 // Node-side subprocess caps. Add headroom over PYTHON_LLM_TIMEOUT_S so a
 // single slow-but-eventually-finishing request doesn't get killed mid-flight.
 const LLM_TIMEOUT_MS = (PYTHON_LLM_TIMEOUT_S + 30) * 1000;
-// MSG conversion runs body + every attachment through the LLM sequentially,
-// so scanned PDFs with many pages need a much larger overall budget — but
-// each individual request is still bounded by PYTHON_LLM_TIMEOUT_S.
+// PPTX and MSG conversions call the LLM once per image/slide/attachment
+// sequentially (markitdown's PptxConverter isn't parallelised), so a deck
+// with many images needs a much larger overall budget than a single file.
+const PPTX_LLM_TIMEOUT_MS = 720_000;
 const MSG_LLM_TIMEOUT_MS = 720_000;
 
 function conversionErrorBody(title: string, detail: string): string {
@@ -264,12 +265,13 @@ export async function runMarkitdown(
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
+		const subprocessTimeout = fileExt === '.pptx' ? PPTX_LLM_TIMEOUT_MS : LLM_TIMEOUT_MS;
 		return new Promise((resolve) => {
 			runWithPhases(
 				pythonCommand,
 				['-c', convertScript, absolutePath],
 				{
-					timeout: LLM_TIMEOUT_MS,
+					timeout: subprocessTimeout,
 					maxBuffer: 200 * 1024 * 1024,
 					env: {
 						...process.env,
@@ -301,7 +303,7 @@ export async function runMarkitdown(
 						}
 						new Notice('FileDrop: LLM conversion failed — see note body for details.');
 						const gwContext = `Gateway: ${gateway.name}\nURL: ${gateway.baseUrl}\nModel: ${gateway.model}\n\n`;
-						resolve(conversionErrorBody('LLM conversion failed', gwContext + subprocessErrorDetail(error, stderr, stdout, LLM_TIMEOUT_MS)));
+						resolve(conversionErrorBody('LLM conversion failed', gwContext + subprocessErrorDetail(error, stderr, stdout, subprocessTimeout)));
 						return;
 					}
 					if (!stdout.trim()) {
