@@ -52,9 +52,11 @@ The script prints `KEY=VALUE` lines. Parse them and abort with a clear message i
 - `BRANCH` is not `main` → warn and ask for confirmation before continuing
 - `TAG_EXISTS=true` → error, cannot overwrite an existing tag
 
-### 5. Update manifest.json
+### 5. Update manifest.json and package.json
 
-Read `manifest.json`, update the `"version"` field to the new tag, write it back using the Edit tool.
+Update the `"version"` field to the new tag in **both** files using the Edit tool:
+- `manifest.json` — the canonical plugin version (validated by `release.sh`).
+- `package.json` — keep it in lockstep so `npm run build` / `npm run dev` report the real version instead of a stale one.
 
 ### 6. Gather changes since last release
 

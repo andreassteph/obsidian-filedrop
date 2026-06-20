@@ -59,6 +59,13 @@ if [[ "$MANIFEST_VERSION" != "$TAG" ]]; then
   FAIL=1
 fi
 
+PACKAGE_VERSION=$(node -e "console.log(require('./package.json').version)" 2>/dev/null || echo "")
+if [[ "$PACKAGE_VERSION" != "$TAG" ]]; then
+  echo "Error: package.json version ($PACKAGE_VERSION) does not match tag ($TAG)." >&2
+  echo "Update package.json before running this script (keep it in lockstep with manifest.json)." >&2
+  FAIL=1
+fi
+
 [[ $FAIL -eq 1 ]] && exit 1
 
 # ── Build ────────────────────────────────────────────────────────────────────
