@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.5 — Smarter LLM error handling for PPTX and PDF conversion
+
+### Changes
+
+- Fix PPTX and PDF conversions timing out silently: subprocess timeout now scales at 50s per slide/page (pre-flight count query) instead of a flat 180s cap
+- On LLM failure, surface an error callout in the note and fall back to plain markitdown text extraction instead of producing no output
+- PDF OCR: first failing LLM call sets a stop flag so queued pages skip immediately rather than each waiting out their timeout
+
 ## 0.5.4 — Fix PPTX conversion timeout for large decks
 
 ### Changes
