@@ -1,5 +1,16 @@
 # Release Notes
 
+## 0.5.3 — External folder linking, PPTX support, and conversion reliability
+
+### Changes
+
+- Add external linked folder feature — files and subfolders outside the vault are linked as notes with `external: true` frontmatter and `file://` source links
+- Show page/slide progress during long PDF and PPTX conversions
+- Compress large images before sending to the LLM gateway to avoid HTTP 413 errors
+- Parallelize group conversion for faster throughput across multi-file drops
+- Surface captured output when a conversion times out for easier debugging
+- Add `pptx` extra to markitdown dependency for PowerPoint conversion support
+
 ## 0.5.2 — Reliability fixes for rediscovery, .msg attachments, and conversion status
 
 ### Changes
