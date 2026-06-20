@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.5.6 — Improved PPTX conversion and extraction
+
+### Changes
+
+- Add structure-aware PPTX conversion with embedded-image extraction to sibling folders
+- Fix PPTX geometry handling for grouped shapes and chart extraction
+- Improve robustness with unique image naming, batching, and validation
+- Add comprehensive test coverage for PPTX extraction
+
 ## 0.5.5 — Smarter LLM error handling for PPTX and PDF conversion
 
 ### Changes
