@@ -141,6 +141,7 @@ export interface DroppedFile {
 	external?: boolean;
 	sourcePath?: string;      // absolute external path (file or top-level folder)
 	sourceSignature?: string; // size+mtime fingerprint for change detection
+	pageProgress?: { current: number; total: number }; // live page/slide progress during conversion
 }
 
 export interface PluginData {

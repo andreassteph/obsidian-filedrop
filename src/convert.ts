@@ -11,6 +11,7 @@ const path = require('path') as typeof import('path');
 
 export type ConvertPhase = 'markitdown' | 'llm-image';
 export type OnPhase = (phase: ConvertPhase) => void;
+export type OnProgress = (current: number, total: number) => void;
 
 // Run a subprocess, streaming stderr live so we can forward `[filedrop:phase]`
 // markers to the caller, while still buffering the full stdout/stderr for the
@@ -29,6 +30,7 @@ function runWithPhases(
 	options: { timeout?: number; maxBuffer?: number; env?: NodeJS.ProcessEnv },
 	onPhase: OnPhase | undefined,
 	done: (error: SubprocessError | null, stdout: string, stderr: string) => void,
+	onProgress?: OnProgress,
 ): void {
 	let stdout = '';
 	let stderr = '';
@@ -69,6 +71,8 @@ function runWithPhases(
 			stderrLine = stderrLine.slice(nl + 1);
 			const m = line.match(/^\[filedrop:phase\]\s+(\S+)/);
 			if (m && onPhase) onPhase(m[1] as ConvertPhase);
+			const p = line.match(/^\[filedrop:page-progress\]\s+(\d+)\/(\d+)/);
+			if (p && onProgress) onProgress(Number(p[1]), Number(p[2]));
 		}
 	});
 
@@ -134,8 +138,8 @@ function timeoutDetail(stderr: string, stdout: string, timeoutMs?: number): stri
 		const m = line.match(/^\[filedrop:phase\]\s+(\S+)/);
 		if (m) lastPhase = m[1];
 	}
-	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
-	const otherLines = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]') && !l.startsWith('[filedrop:page-progress]'));
+	const otherLines = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]') && !l.startsWith('[filedrop:page-progress]'));
 
 	const budget = timeoutMs ? ` after ${Math.round(timeoutMs / 1000)}s` : '';
 	const parts = [`The conversion process timed out before finishing${budget}.`];
@@ -177,8 +181,8 @@ function subprocessErrorDetail(
 	const lines = (stderr || '').split('\n').map((l) => l.trim()).filter(Boolean);
 	// `[filedrop]` is our diagnostic prefix; `[filedrop:phase]` is the live
 	// progress marker for the status pill — surface the former, drop the latter.
-	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
-	const traceback = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]'));
+	const diagnostics = lines.filter((l) => l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]') && !l.startsWith('[filedrop:page-progress]'));
+	const traceback = lines.filter((l) => !l.startsWith('[filedrop]') && !l.startsWith('[filedrop:phase]') && !l.startsWith('[filedrop:page-progress]'));
 	const parts = [...diagnostics];
 	if (traceback.length) parts.push(traceback[traceback.length - 1]);
 	if (parts.length) return parts.join('\n');
@@ -243,6 +247,7 @@ export async function runMarkitdown(
 	gateway: LlmGateway | null,
 	onPhase?: OnPhase,
 	describeExtensions?: string,
+	onProgress?: OnProgress,
 ): Promise<string> {
 	const dotIdx = absolutePath.lastIndexOf('.');
 	const fileExt = dotIdx >= 0 ? absolutePath.slice(dotIdx).toLowerCase() : '';
@@ -314,7 +319,8 @@ export async function runMarkitdown(
 						return;
 					}
 					resolve(stdout.trim());
-				}
+				},
+				onProgress,
 			);
 		});
 	}
@@ -395,6 +401,7 @@ export async function runMsgConversion(
 	pythonCommand: string,
 	gateway: LlmGateway | null,
 	onPhase?: OnPhase,
+	onProgress?: OnProgress,
 ): Promise<MsgConversionResult> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting MSG without LLM.');
@@ -477,7 +484,8 @@ export async function runMsgConversion(
 						attachments: [],
 					});
 				}
-			}
+			},
+			onProgress,
 		);
 	});
 }

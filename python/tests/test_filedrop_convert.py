@@ -325,6 +325,85 @@ def test_convert_pdf_pages_skipped_when_vision_disabled():
     assert "vision" in result
 
 
+class _FakeDoc:
+    """A minimal stand-in for a PyMuPDF Document: iterable over fake pages,
+    with a `page_count`. `_jpeg_bytes_under_cap` is patched separately so the
+    fake pixmap returned by `get_pixmap` never needs real encoding."""
+
+    def __init__(self, page_count):
+        self.page_count = page_count
+        self._pages = [types.SimpleNamespace(get_pixmap=lambda matrix=None: object()) for _ in range(page_count)]
+
+    def __iter__(self):
+        return iter(self._pages)
+
+
+def _fake_fitz_module(page_count):
+    doc = _FakeDoc(page_count)
+    return types.SimpleNamespace(open=lambda path: doc, Matrix=lambda *a: None)
+
+
+def test_convert_pdf_pages_with_llm_emits_progress_above_threshold(capsys):
+    client, _ = _recording_client()
+    fake_fitz = _fake_fitz_module(5)
+    with patch.dict(sys.modules, {"fitz": fake_fitz}), \
+            patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"), \
+            patch.object(filedrop_convert, "_jpeg_bytes_under_cap", return_value=b"x"):
+        filedrop_convert._convert_pdf_pages_with_llm("/tmp/scan.pdf", dict(BASE_ENV))
+    err = capsys.readouterr().err
+    progress_lines = [l for l in err.splitlines() if l.startswith("[filedrop:page-progress]")]
+    assert len(progress_lines) == 5
+    assert progress_lines[-1] == "[filedrop:page-progress] 5/5"
+
+
+def test_convert_pdf_pages_with_llm_no_progress_below_threshold(capsys):
+    client, _ = _recording_client()
+    fake_fitz = _fake_fitz_module(3)
+    with patch.dict(sys.modules, {"fitz": fake_fitz}), \
+            patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"), \
+            patch.object(filedrop_convert, "_jpeg_bytes_under_cap", return_value=b"x"):
+        filedrop_convert._convert_pdf_pages_with_llm("/tmp/scan.pdf", dict(BASE_ENV))
+    err = capsys.readouterr().err
+    assert "[filedrop:page-progress]" not in err
+
+
+def test_pptx_slide_count_uses_python_pptx():
+    pptx_stub = types.SimpleNamespace(
+        Presentation=lambda path: types.SimpleNamespace(slides=[object()] * 4)
+    )
+    with patch.dict(sys.modules, {"pptx": pptx_stub}):
+        assert filedrop_convert._pptx_slide_count("/tmp/deck.pptx") == 4
+
+
+def test_pptx_slide_count_returns_none_on_failure():
+    with patch.dict(sys.modules, {"pptx": None}):
+        assert filedrop_convert._pptx_slide_count("/tmp/deck.pptx") is None
+
+
+def test_build_converter_installs_progress_counter_above_threshold():
+    client, calls = _recording_client()
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"), \
+            patch.object(filedrop_convert, "MarkItDown"):
+        filedrop_convert.build_converter(dict(BASE_ENV), progress_total=4)
+        client.chat.completions.create(model="x")
+    # The wrapped create() still forwards to the original and records the call.
+    assert len(calls) == 1
+
+
+def test_build_converter_skips_progress_counter_below_threshold(capsys):
+    client, _ = _recording_client()
+    with patch.object(filedrop_convert, "_make_client", return_value=client), \
+            patch.object(filedrop_convert, "_install_thinking_filter"), \
+            patch.object(filedrop_convert, "MarkItDown"):
+        filedrop_convert.build_converter(dict(BASE_ENV), progress_total=2)
+        client.chat.completions.create(model="x")
+    err = capsys.readouterr().err
+    assert "[filedrop:page-progress]" not in err
+
+
 @pytest.mark.parametrize(
     "env, expected",
     [

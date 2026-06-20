@@ -396,9 +396,13 @@ export class FileDropView extends ItemView {
 		});
 
 		const status = entry.status ?? 'unknown';
+		const baseLabel = STATUS_LABELS[status] ?? status;
+		const progressSuffix = entry.pageProgress && isConvertingStatus(status)
+			? ` (page ${entry.pageProgress.current}/${entry.pageProgress.total})`
+			: '';
 		headerRow.createEl('span', {
 			cls: `filedrop-status filedrop-status--${status}`,
-			text: STATUS_LABELS[status] ?? status,
+			text: baseLabel + progressSuffix,
 		});
 
 		const inProgress = status === 'moving' || isConvertingStatus(status);
