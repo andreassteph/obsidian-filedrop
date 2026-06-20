@@ -137,6 +137,87 @@ def _temperature_kwargs(env):
     return {"temperature": 0} if supported else {}
 
 
+# Images are sent to the gateway as a base64 data URI. Raw high-resolution
+# photos can exceed the gateway's request-size limit and come back as HTTP 413
+# ("Request Entity Too Large"). We re-encode large images as a compressed JPEG
+# to shrink the payload while keeping full resolution; only if compression alone
+# is not enough do we fall back to reducing the dimensions.
+_DEFAULT_IMAGE_MAX_BYTES = 4 * 1024 * 1024   # re-encode trigger + payload cap
+_DEFAULT_IMAGE_JPEG_QUALITY = 85
+_DEFAULT_IMAGE_MIN_DIM = 512                  # don't shrink the longest side below this
+
+
+def _image_limits(env):
+    """Read the image-payload limits, honoring optional env overrides."""
+    def _int(name, default):
+        try:
+            return int(env.get(name) or default)
+        except (TypeError, ValueError):
+            return default
+    return (
+        _int("FILEDROP_IMAGE_MAX_BYTES", _DEFAULT_IMAGE_MAX_BYTES),
+        _int("FILEDROP_IMAGE_JPEG_QUALITY", _DEFAULT_IMAGE_JPEG_QUALITY),
+        _int("FILEDROP_IMAGE_MIN_DIM", _DEFAULT_IMAGE_MIN_DIM),
+    )
+
+
+def _normalize_for_jpeg(pix):
+    """Return a pixmap that JPEG can encode: JPEG has no alpha channel and only
+    supports gray/RGB, so drop alpha and convert CMYK / other colorspaces to RGB."""
+    import fitz  # pymupdf  # type: ignore
+
+    if pix.alpha:
+        pix = fitz.Pixmap(pix, 0)  # drop alpha
+    if pix.colorspace is None or pix.colorspace.n > 3:  # e.g. CMYK -> RGB
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    return pix
+
+
+def _jpeg_bytes_under_cap(pix, quality, max_bytes, min_dim):
+    """Encode a pixmap to compressed JPEG, keeping full resolution when possible.
+    If the JPEG is still larger than max_bytes, progressively shrink the
+    dimensions (~0.8x per step, never below min_dim on the longest side) and
+    re-encode until it fits."""
+    import fitz  # pymupdf  # type: ignore
+
+    pix = _normalize_for_jpeg(pix)
+    data = pix.tobytes("jpg", jpg_quality=quality)
+    while len(data) > max_bytes and max(pix.width, pix.height) > min_dim:
+        tw, th = int(pix.width * 0.8), int(pix.height * 0.8)
+        # Clamp so the longest side never drops below min_dim.
+        longest = max(tw, th)
+        if longest < min_dim:
+            f = min_dim / max(pix.width, pix.height)
+            tw, th = int(pix.width * f), int(pix.height * f)
+        pix = fitz.Pixmap(pix, max(1, tw), max(1, th), None)
+        data = pix.tobytes("jpg", jpg_quality=quality)
+    return data
+
+
+def _compressed_image_path(path, env):
+    """If `path` is a large image, write a compressed-JPEG copy to a temp file and
+    return its path so the oversized raw bytes never reach the gateway (avoids
+    HTTP 413). Returns None when the image is already small enough, or on any
+    failure, so the caller falls back to the original file untouched."""
+    max_bytes, quality, min_dim = _image_limits(env)
+    try:
+        if os.path.getsize(path) <= max_bytes:
+            return None
+        import fitz  # pymupdf  # type: ignore
+        import tempfile
+
+        data = _jpeg_bytes_under_cap(fitz.Pixmap(path), quality, max_bytes, min_dim)
+        fd, tmp = tempfile.mkstemp(suffix=".jpg")
+        try:
+            os.write(fd, data)
+        finally:
+            os.close(fd)
+        return tmp
+    except Exception as exc:
+        print(f"[filedrop] image compression skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+
+
 def build_converter(env):
     client = _make_client(env)
     _install_thinking_filter(client)
@@ -186,9 +267,18 @@ def convert(path, env):
     # Pure-image files go straight into the LLM via markitdown's image path,
     # so signal that phase up front instead of "markitdown".
     image_exts = (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif")
-    _emit_phase("llm-image" if path.lower().endswith(image_exts) else "markitdown")
+    is_image = path.lower().endswith(image_exts)
+    _emit_phase("llm-image" if is_image else "markitdown")
+
+    # For large images, hand markitdown a compressed-JPEG copy so the oversized
+    # raw bytes never reach the gateway (avoids HTTP 413). Small images and other
+    # file types use the original path untouched.
+    convert_path = path
+    temp_image = _compressed_image_path(path, env) if is_image else None
+    if temp_image:
+        convert_path = temp_image
     try:
-        result = build_converter(env).convert(path).text_content
+        result = build_converter(env).convert(convert_path).text_content
         if result and result.strip():
             return result
     except Exception as exc:
@@ -199,7 +289,13 @@ def convert(path, env):
             # The LLM-enhanced step failed for a non-PDF (e.g. a PPTX markitdown
             # could not fully process). Keep the plain markitdown conversion so
             # the file's extractable text is still captured.
-            return _convert_without_llm(path)
+            return _convert_without_llm(convert_path)
+    finally:
+        if temp_image:
+            try:
+                os.remove(temp_image)
+            except OSError:
+                pass
 
     # For PDFs that produced nothing (scanned / image-only), render each page
     # via PyMuPDF and OCR with the LLM.
@@ -266,9 +362,17 @@ def _convert_pdf_pages_with_llm(path, env):
     # multiple threads, and rendering is fast/CPU-bound. The slow part is the
     # per-page LLM request, which we then run in a small thread pool. The OpenAI
     # client (httpx under the hood) is safe to share across threads.
+    # Each page is a compressed JPEG instead of raw PNG: far smaller payload
+    # (avoids HTTP 413 on large/high-res pages), with a dimension fallback if
+    # still big.
+    max_bytes, quality, min_dim = _image_limits(env)
     mat = fitz.Matrix(2, 2)  # 2× zoom for better OCR quality
-    images = [base64.b64encode(page.get_pixmap(matrix=mat).tobytes("png")).decode("ascii")
-              for page in doc]
+    images = [
+        base64.b64encode(
+            _jpeg_bytes_under_cap(page.get_pixmap(matrix=mat), quality, max_bytes, min_dim)
+        ).decode("ascii")
+        for page in doc
+    ]
 
     def _ocr_page(item):
         page_num, img_b64 = item
@@ -279,7 +383,7 @@ def _convert_pdf_pages_with_llm(path, env):
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{img_b64}"}},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img_b64}"}},
                     ],
                 }],
                 **_token_kwargs(env, 4096),

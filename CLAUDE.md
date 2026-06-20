@@ -70,6 +70,7 @@ gateway and its detected capabilities to Python:
 - `FILEDROP_LLM_VISION`, `FILEDROP_LLM_TEMPERATURE` — `1`/`0` capability flags
 - `FILEDROP_LLM_TIMEOUT` — per-request timeout (seconds)
 - `FILEDROP_DESCRIBE` / `FILEDROP_DESCRIBE_EXTS` — enable/scope the describe fallback
+- `FILEDROP_IMAGE_MAX_BYTES` / `FILEDROP_IMAGE_JPEG_QUALITY` / `FILEDROP_IMAGE_MIN_DIM` — optional (Python-only, no TS plumbing) knobs for the large-image guard: big images are re-encoded as a compressed JPEG (and downscaled only as a last resort, never below `MIN_DIM`) so the payload stays under the gateway's request-size limit (avoids HTTP 413)
 
 These mirror the TS `ModelCapabilities` so Python builds requests the same way
 `callChat()` does — keep the two sides in sync when adding a capability.
