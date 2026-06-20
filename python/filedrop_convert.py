@@ -515,15 +515,20 @@ DEFAULT_IMAGE_PROMPT = (
 )
 
 
-def _iter_shapes(shapes):
-    """Yield every shape, recursing into group shapes (depth-first, document
-    order) so pictures/text nested inside groups aren't missed. MSO_SHAPE_TYPE
+def _iter_shapes(shapes, inherited_geom=None):
+    """Yield (shape, effective_geom) for every shape, recursing into group shapes
+    (depth-first, document order) so pictures/text nested inside groups aren't
+    missed. A grouped child's own left/top are in the group's *child* coordinate
+    space, not slide EMUs, so they can't be compared with top-level shapes; we
+    attribute the (outermost) group's slide-space geometry to all its descendants
+    instead, which keeps a group clustered in its real slide region. MSO_SHAPE_TYPE
     .GROUP == 6; checking the attribute as well stays robust across versions."""
     for shape in shapes:
         if getattr(shape, "shape_type", None) == 6 and hasattr(shape, "shapes"):
-            yield from _iter_shapes(shape.shapes)
+            group_geom = inherited_geom if inherited_geom is not None else _shape_geometry(shape)
+            yield from _iter_shapes(shape.shapes, group_geom)
         else:
-            yield shape
+            yield shape, inherited_geom if inherited_geom is not None else _shape_geometry(shape)
 
 
 def _emu(value):
@@ -587,6 +592,51 @@ def _table_markdown(table):
              "| " + " | ".join("---" for _ in range(width)) + " |"]
     for r in rows[1:]:
         lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
+
+
+def _chart_title(chart):
+    """A chart's title text, or "" — best-effort (never raises)."""
+    try:
+        if chart.has_title:
+            return (chart.chart_title.text_frame.text or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _chart_markdown(chart):
+    """Render a chart's underlying data as a markdown table (categories × series)
+    so charts aren't silently dropped — the reflow LLM can table it and describe
+    the trend. Returns "" when no series data is available."""
+    def _fmt(v):
+        if v is None:
+            return ""
+        if isinstance(v, float) and v.is_integer():
+            return str(int(v))
+        return str(v)
+
+    try:
+        categories = list(chart.plots[0].categories) if chart.plots else []
+    except Exception:
+        categories = []
+    series = []
+    try:
+        for idx, s in enumerate(chart.series, 1):
+            series.append((str(s.name) if s.name else f"Series {idx}", list(s.values)))
+    except Exception:
+        series = []
+    if not series:
+        return ""
+
+    header = ["Category"] + [name for name, _ in series]
+    lines = ["| " + " | ".join(header) + " |",
+             "| " + " | ".join("---" for _ in header) + " |"]
+    row_count = max((len(vals) for _, vals in series), default=0)
+    for r in range(row_count):
+        cat = str(categories[r]) if r < len(categories) else ""
+        row = [cat] + [_fmt(vals[r]) if r < len(vals) else "" for _, vals in series]
+        lines.append("| " + " | ".join(row) + " |")
     return "\n".join(lines)
 
 
@@ -656,9 +706,7 @@ def _extract_slide_elements(slide, pics_dir, slide_index, seen):
     (element, pptx_image) whose description still needs an LLM call."""
     elements = []
     pending = []
-    for shape in _iter_shapes(slide.shapes):
-        geom = _shape_geometry(shape)
-
+    for shape, geom in _iter_shapes(slide.shapes):
         image = None
         try:
             image = shape.image  # raises on non-picture shapes
@@ -684,6 +732,13 @@ def _extract_slide_elements(slide, pics_dir, slide_index, seen):
             md = _table_markdown(shape.table)
             if md:
                 elements.append({"type": "table", "geom": geom, "markdown": md})
+            continue
+
+        if getattr(shape, "has_chart", False):
+            title = _chart_title(shape.chart)
+            md = _chart_markdown(shape.chart)
+            if title or md:
+                elements.append({"type": "chart", "geom": geom, "title": title, "markdown": md})
             continue
 
         if getattr(shape, "has_text_frame", False):

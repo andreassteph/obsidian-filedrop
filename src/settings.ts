@@ -918,6 +918,7 @@ export interface SlideGeom {
 export type SlideElement =
 	| { type: 'text'; geom: SlideGeom; paragraphs: { text: string; level: number }[] }
 	| { type: 'table'; geom: SlideGeom; markdown: string }
+	| { type: 'chart'; geom: SlideGeom; title: string; markdown: string }
 	| { type: 'picture'; geom: SlideGeom; filename: string; description: string };
 
 export interface SlideDoc {
@@ -950,6 +951,8 @@ function slidesToPrompt(slides: SlideDoc[]): string {
 				parts.push(`TEXTBOX ${pos}\n${text}`);
 			} else if (el.type === 'table') {
 				parts.push(`TABLE ${pos}\n${el.markdown}`);
+			} else if (el.type === 'chart') {
+				parts.push(`CHART ${pos}${el.title ? ` title="${el.title}"` : ''}\n${el.markdown}`);
 			} else {
 				parts.push(`IMAGE ${pos} ref=${el.filename}${el.description ? ` description="${el.description}"` : ''}`);
 			}
@@ -988,6 +991,7 @@ const PPTX_REFLOW_SYSTEM =
 	'Infer the correct reading order from the geometry: top-to-bottom, and for shapes positioned side by side, left-to-right as columns. ' +
 	'Render each slide under a "## Slide N" heading (use the slide number given). ' +
 	'Preserve bullet indentation, keep tables as Markdown tables, and keep the text faithful — do not summarize, drop, or invent content. ' +
+	'For CHART elements, render the provided data as a Markdown table and add a one-sentence summary of the trend it shows. ' +
 	"If a slide has NOTES, render them under a '### Notes' subheading after that slide's content. " +
 	'Emit every image exactly as ![description](ref), using the given ref filename verbatim and unmodified — no folder and no path. ' +
 	'Return ONLY the Markdown, with no preamble and no code fences.';
@@ -1073,6 +1077,8 @@ export function renderSlidesPlain(slides: SlideDoc[]): string {
 				);
 			} else if (el.type === 'table') {
 				out.push(el.markdown);
+			} else if (el.type === 'chart') {
+				out.push((el.title ? `**${el.title}**\n\n` : '') + el.markdown);
 			} else {
 				out.push(`![${el.description}](${el.filename})`);
 			}

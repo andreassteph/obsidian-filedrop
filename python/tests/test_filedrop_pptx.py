@@ -54,10 +54,26 @@ def _fake_element(descr=""):
     return types.SimpleNamespace(_nvXxPr=types.SimpleNamespace(cNvPr=cnvpr))
 
 
+class _FakeSeries:
+    def __init__(self, name, values):
+        self.name = name
+        self.values = values
+
+
+class _FakeChart:
+    def __init__(self, title, categories, series):
+        self.has_title = title is not None
+        self.chart_title = types.SimpleNamespace(
+            text_frame=types.SimpleNamespace(text=title or "")
+        )
+        self.plots = [types.SimpleNamespace(categories=categories)]
+        self.series = [_FakeSeries(n, v) for n, v in series]
+
+
 class _FakeShape:
     def __init__(self, name="", left=0, top=0, width=0, height=0,
                  shape_type=1, text_frame=None, table=None, image=None,
-                 descr="", shapes=None):
+                 descr="", shapes=None, chart=None):
         self.name = name
         self.left = left
         self.top = top
@@ -67,6 +83,7 @@ class _FakeShape:
         self._text_frame = text_frame
         self._table = table
         self._image = image
+        self._chart = chart
         self._element = _fake_element(descr)
         self.shapes = shapes  # set (to a list) only for group shapes
 
@@ -85,6 +102,14 @@ class _FakeShape:
     @property
     def table(self):
         return self._table
+
+    @property
+    def has_chart(self):
+        return self._chart is not None
+
+    @property
+    def chart(self):
+        return self._chart
 
     @property
     def image(self):
@@ -169,6 +194,28 @@ def test_extract_slide_elements_recurses_groups(tmp_path):
     elements, _ = filedrop_convert._extract_slide_elements(_FakeSlide([group]), str(tmp_path), 1, set())
     assert [e["type"] for e in elements] == ["text"]
     assert elements[0]["paragraphs"] == [{"text": "deep", "level": 0}]
+
+
+def test_grouped_shapes_inherit_group_geometry(tmp_path):
+    # A grouped child's own left/top are in the group's child coordinate space,
+    # so we attribute the group's slide-space geometry to it instead.
+    inner = _FakeShape(name="Pic", left=1, top=1, width=1, height=1, image=_FakeImage(b"x"))
+    group = _FakeShape(name="Group", left=500, top=600, width=700, height=800,
+                       shape_type=6, shapes=[inner])
+    elements, _ = filedrop_convert._extract_slide_elements(_FakeSlide([group]), str(tmp_path), 1, set())
+    assert elements[0]["geom"] == {"left": 500, "top": 600, "width": 700, "height": 800}
+
+
+def test_extract_slide_elements_captures_chart(tmp_path):
+    chart = _FakeChart("Revenue", ["Q1", "Q2"], [("2024", [10, 20]), ("2025", [15.0, 25.0])])
+    shape = _FakeShape(name="Chart 1", chart=chart)
+    elements, _ = filedrop_convert._extract_slide_elements(_FakeSlide([shape]), str(tmp_path), 1, set())
+    assert elements[0]["type"] == "chart"
+    assert elements[0]["title"] == "Revenue"
+    md = elements[0]["markdown"]
+    assert "| Category | 2024 | 2025 |" in md
+    assert "| Q1 | 10 | 15 |" in md   # floats that are whole numbers render as ints
+    assert "| Q2 | 20 | 25 |" in md
 
 
 def test_extract_slide_elements_keeps_author_alt_text(tmp_path):
