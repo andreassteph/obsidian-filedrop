@@ -224,6 +224,44 @@ def test_convert_msg_writes_attachment_to_temp_file(tmp_path):
     shutil.rmtree(os.path.dirname(a["temp_path"]), ignore_errors=True)
 
 
+def test_image_limits_defaults_and_overrides():
+    assert filedrop_msg._image_limits(dict(BASE_ENV)) == (
+        filedrop_msg._DEFAULT_IMAGE_MAX_BYTES,
+        filedrop_msg._DEFAULT_IMAGE_JPEG_QUALITY,
+        filedrop_msg._DEFAULT_IMAGE_MIN_DIM,
+    )
+    env = dict(BASE_ENV, FILEDROP_IMAGE_MAX_BYTES="1000",
+               FILEDROP_IMAGE_JPEG_QUALITY="60", FILEDROP_IMAGE_MIN_DIM="256")
+    assert filedrop_msg._image_limits(env) == (1000, 60, 256)
+
+
+def test_compressed_image_path_returns_none_on_failure():
+    assert filedrop_msg._compressed_image_path("/tmp/does-not-exist.jpg", dict(BASE_ENV)) is None
+
+
+def test_convert_file_large_image_converts_compressed_copy():
+    """A large image → markitdown is handed the compressed temp copy, which is
+    then cleaned up."""
+    llm_md = MagicMock()
+    llm_md.convert.return_value.text_content = "# described"
+    with patch.object(filedrop_msg, "_compressed_image_path", return_value="/tmp/small.jpg"), \
+            patch.object(filedrop_msg.os, "remove") as remove:
+        result = filedrop_msg._convert_file("/tmp/photo.jpg", llm_md, dict(BASE_ENV))
+    assert result == "# described"
+    llm_md.convert.assert_called_once_with("/tmp/small.jpg")
+    remove.assert_called_once_with("/tmp/small.jpg")
+
+
+def test_convert_file_small_image_uses_original_path():
+    """Small image → no compression, markitdown gets the original path."""
+    llm_md = MagicMock()
+    llm_md.convert.return_value.text_content = "# described"
+    with patch.object(filedrop_msg, "_compressed_image_path", return_value=None):
+        result = filedrop_msg._convert_file("/tmp/photo.jpg", llm_md, dict(BASE_ENV))
+    assert result == "# described"
+    llm_md.convert.assert_called_once_with("/tmp/photo.jpg")
+
+
 def test_convert_pdf_pages_skipped_when_vision_disabled():
     """No-vision model → emit a warning and never construct the LLM client."""
     env = dict(BASE_ENV, FILEDROP_LLM_VISION="0")

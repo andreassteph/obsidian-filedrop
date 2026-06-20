@@ -1,4 +1,5 @@
 import io
+import os
 import sys
 import types
 from unittest.mock import patch
@@ -322,6 +323,94 @@ def test_convert_pdf_pages_skipped_when_vision_disabled():
     make_client.assert_not_called()
     assert result.startswith("> [!warning]")
     assert "vision" in result
+
+
+@pytest.mark.parametrize(
+    "env, expected",
+    [
+        ({}, (filedrop_convert._DEFAULT_IMAGE_MAX_BYTES,
+              filedrop_convert._DEFAULT_IMAGE_JPEG_QUALITY,
+              filedrop_convert._DEFAULT_IMAGE_MIN_DIM)),
+        ({"FILEDROP_IMAGE_MAX_BYTES": "1000",
+          "FILEDROP_IMAGE_JPEG_QUALITY": "60",
+          "FILEDROP_IMAGE_MIN_DIM": "256"}, (1000, 60, 256)),
+        # Bad values fall back to the defaults rather than crashing.
+        ({"FILEDROP_IMAGE_MAX_BYTES": "nope"},
+         (filedrop_convert._DEFAULT_IMAGE_MAX_BYTES,
+          filedrop_convert._DEFAULT_IMAGE_JPEG_QUALITY,
+          filedrop_convert._DEFAULT_IMAGE_MIN_DIM)),
+    ],
+)
+def test_image_limits(env, expected):
+    assert filedrop_convert._image_limits(dict(BASE_ENV, **env)) == expected
+
+
+def _solid_pixmap(fitz, w, h, value=200):
+    pix = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, w, h), False)
+    pix.clear_with(value)
+    return pix
+
+
+def _noise_pixmap(fitz, w, h):
+    """A random-pixel pixmap that barely compresses, so JPEG stays large."""
+    import os
+    return fitz.Pixmap(fitz.csRGB, w, h, os.urandom(w * h * 3), False)
+
+
+def test_jpeg_under_cap_keeps_full_resolution_when_compression_suffices():
+    fitz = pytest.importorskip("fitz")
+    pix = _solid_pixmap(fitz, 3000, 2000)
+    data = filedrop_convert._jpeg_bytes_under_cap(pix, 85, 4 * 1024 * 1024, 512)
+    decoded = fitz.Pixmap(data)
+    assert (decoded.width, decoded.height) == (3000, 2000)  # dims unchanged
+    assert len(data) <= 4 * 1024 * 1024
+
+
+def test_jpeg_under_cap_downsizes_as_fallback_not_below_min_dim():
+    fitz = pytest.importorskip("fitz")
+    pix = _noise_pixmap(fitz, 1500, 1500)
+    data = filedrop_convert._jpeg_bytes_under_cap(pix, 85, max_bytes=5000, min_dim=512)
+    decoded = fitz.Pixmap(data)
+    # Compression alone can't reach 5KB, so it shrinks — but stops at min_dim.
+    assert max(decoded.width, decoded.height) == 512
+    assert max(decoded.width, decoded.height) < 1500
+
+
+def test_jpeg_under_cap_handles_alpha_and_cmyk():
+    fitz = pytest.importorskip("fitz")
+    rgba = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 64, 64), True)  # has alpha
+    rgba.clear_with(120)
+    cmyk = fitz.Pixmap(fitz.csCMYK, fitz.IRect(0, 0, 64, 64), False)
+    cmyk.clear_with(50)
+    for pix in (rgba, cmyk):
+        data = filedrop_convert._jpeg_bytes_under_cap(pix, 85, 4 * 1024 * 1024, 512)
+        assert fitz.Pixmap(data).width == 64  # decodable JPEG
+
+
+def test_compressed_image_path_passthrough_for_small_file(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    small = tmp_path / "small.jpg"
+    small.write_bytes(_solid_pixmap(fitz, 100, 100).tobytes("jpg", jpg_quality=85))
+    assert filedrop_convert._compressed_image_path(str(small), dict(BASE_ENV)) is None
+
+
+def test_compressed_image_path_recompresses_large_file(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    big = tmp_path / "big.jpg"
+    big.write_bytes(_noise_pixmap(fitz, 400, 400).tobytes("jpg", jpg_quality=95))
+    env = dict(BASE_ENV, FILEDROP_IMAGE_MAX_BYTES="500")
+    out = filedrop_convert._compressed_image_path(str(big), env)
+    try:
+        assert out is not None and out != str(big)
+        assert fitz.Pixmap(out).width  # produced a decodable JPEG
+    finally:
+        if out:
+            os.remove(out)
+
+
+def test_compressed_image_path_returns_none_on_failure():
+    # Missing file → os.path.getsize raises → caller falls back to the original.
+    assert filedrop_convert._compressed_image_path("/tmp/does-not-exist.jpg", dict(BASE_ENV)) is None
 
 
 def test_install_thinking_filter_leaves_clean_content():
