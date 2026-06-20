@@ -93,9 +93,16 @@ class _FakeShape:
         return self._image
 
 
+class _FakeNotesSlide:
+    def __init__(self, text):
+        self.notes_text_frame = types.SimpleNamespace(text=text)
+
+
 class _FakeSlide:
-    def __init__(self, shapes):
+    def __init__(self, shapes, notes=None):
         self.shapes = shapes
+        self.has_notes_slide = notes is not None
+        self.notes_slide = _FakeNotesSlide(notes) if notes is not None else None
 
 
 def _install_fake_pptx(slides):
@@ -133,16 +140,16 @@ def test_extract_slide_elements_classifies_and_writes_pictures(tmp_path):
     tbl = _FakeShape(name="Grid", table=_FakeTable([["H1", "H2"], ["a", "b"]]))
     slide = _FakeSlide([pic, txt, tbl])
 
-    elements, pending = filedrop_convert._extract_slide_elements(slide, str(tmp_path))
+    elements, pending = filedrop_convert._extract_slide_elements(slide, str(tmp_path), 1, set())
 
     kinds = [e["type"] for e in elements]
     assert kinds == ["picture", "text", "table"]
 
     picture = elements[0]
-    assert picture["filename"] == "Picture19.jpg"
+    # Name is prefixed with the slide index so it stays unique across the deck.
+    assert picture["filename"] == "slide1-Picture19.jpg"
     assert picture["geom"] == {"left": 10, "top": 20, "width": 30, "height": 40}
-    # Bytes were written under markitdown's reference name so the link resolves.
-    written = tmp_path / "Picture19.jpg"
+    written = tmp_path / "slide1-Picture19.jpg"
     assert written.read_bytes() == b"IMG-BYTES"
     # No author alt text => queued for an LLM description.
     assert pending == [(picture, pic._image)]
@@ -159,19 +166,53 @@ def test_extract_slide_elements_classifies_and_writes_pictures(tmp_path):
 def test_extract_slide_elements_recurses_groups(tmp_path):
     inner = _FakeShape(name="Inner", text_frame=_FakeTextFrame([_FakePara(text="deep")]))
     group = _FakeShape(name="Group", shape_type=6, shapes=[inner])
-    elements, _ = filedrop_convert._extract_slide_elements(_FakeSlide([group]), str(tmp_path))
+    elements, _ = filedrop_convert._extract_slide_elements(_FakeSlide([group]), str(tmp_path), 1, set())
     assert [e["type"] for e in elements] == ["text"]
     assert elements[0]["paragraphs"] == [{"text": "deep", "level": 0}]
 
 
 def test_extract_slide_elements_keeps_author_alt_text(tmp_path):
     pic = _FakeShape(name="Logo", image=_FakeImage(b"x"), descr="Company logo")
-    elements, pending = filedrop_convert._extract_slide_elements(_FakeSlide([pic]), str(tmp_path))
+    elements, pending = filedrop_convert._extract_slide_elements(_FakeSlide([pic]), str(tmp_path), 1, set())
     assert elements[0]["description"] == "Company logo"
     assert pending == []  # author alt text => no LLM call needed
 
 
 # --- full structured conversion --------------------------------------------
+
+def test_cross_slide_picture_names_stay_unique(tmp_path):
+    # Two slides reuse the same shape name ("Picture 3"); names must not collide
+    # (otherwise one image overwrites the other on disk).
+    slide1 = _FakeSlide([_FakeShape(name="Picture 3", image=_FakeImage(b"one"))])
+    slide2 = _FakeSlide([_FakeShape(name="Picture 3", image=_FakeImage(b"two"))])
+    with _install_fake_pptx([slide1, slide2]):
+        result = filedrop_convert.convert_pptx_structured(str(tmp_path / "deck.pptx"), {})
+
+    names = [p["filename"] for p in result["pictures"]]
+    assert names == ["slide1-Picture3.jpg", "slide2-Picture3.jpg"]
+    assert len(set(names)) == 2
+    # Both blobs survive — no overwrite.
+    contents = {os.path.basename(p["path"]): open(p["path"], "rb").read() for p in result["pictures"]}
+    assert contents["slide1-Picture3.jpg"] == b"one"
+    assert contents["slide2-Picture3.jpg"] == b"two"
+
+
+def test_convert_pptx_structured_captures_notes(tmp_path):
+    slide = _FakeSlide(
+        [_FakeShape(name="Body", text_frame=_FakeTextFrame([_FakePara(text="Hi")]))],
+        notes="Remember to mention the roadmap.",
+    )
+    with _install_fake_pptx([slide]):
+        result = filedrop_convert.convert_pptx_structured(str(tmp_path / "deck.pptx"), {})
+    assert result["slides"][0]["notes"] == "Remember to mention the roadmap."
+
+
+def test_convert_pptx_structured_omits_empty_notes(tmp_path):
+    slide = _FakeSlide([_FakeShape(name="Body", text_frame=_FakeTextFrame([_FakePara(text="Hi")]))])
+    with _install_fake_pptx([slide]):
+        result = filedrop_convert.convert_pptx_structured(str(tmp_path / "deck.pptx"), {})
+    assert "notes" not in result["slides"][0]
+
 
 def test_convert_pptx_structured_without_llm(tmp_path):
     pic = _FakeShape(name="Picture 1", image=_FakeImage(b"bytes"))
@@ -184,7 +225,7 @@ def test_convert_pptx_structured_without_llm(tmp_path):
     assert len(result["slides"]) == 1
     assert len(result["pictures"]) == 1
     pic_entry = result["pictures"][0]
-    assert pic_entry["filename"] == "Picture1.jpg"
+    assert pic_entry["filename"] == "slide1-Picture1.jpg"
     assert os.path.isfile(pic_entry["path"])
 
 

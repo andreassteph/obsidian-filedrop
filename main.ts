@@ -245,7 +245,16 @@ export default class FileDropPlugin extends Plugin {
 
 		const structured = await structurePptxSlides(result.slides, gateway, () => this.saveSettings());
 		const body = structured.ok ? structured.value : renderSlidesPlain(result.slides);
-		return rewriteImageLinks(body, picturesDirName, writtenNames);
+		const linked = rewriteImageLinks(body, picturesDirName, writtenNames);
+
+		// Guard against a model that ignored "echo the ref verbatim": append any
+		// extracted image the body never referenced so none is silently orphaned.
+		const missing = [...writtenNames].filter(
+			(name) => !linked.includes(encodeURI(`${picturesDirName}/${name}`)),
+		);
+		if (missing.length === 0) return linked;
+		const appended = missing.map((name) => `![](${encodeURI(`${picturesDirName}/${name}`)})`).join('\n\n');
+		return `${linked}\n\n## Unplaced images\n\n${appended}`;
 	}
 
 	// Remove the temp directory holding a .msg's extracted attachments (or a

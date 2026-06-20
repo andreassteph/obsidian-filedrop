@@ -544,8 +544,26 @@ def _shape_geometry(shape):
 
 
 def _picture_filename(shape):
-    """Match markitdown's PPTX picture naming so the emitted links resolve."""
+    """The stripped-name base markitdown uses for a PPTX picture, plus .jpg.
+    Not used as the on-disk name directly — see _unique_picture_name, which
+    prefixes the slide index to keep names unique across the deck."""
     return re.sub(r"\W", "", shape.name or "image") + ".jpg"
+
+
+def _unique_picture_name(shape, slide_index, seen):
+    """A deck-unique picture filename. PowerPoint shape names ("Picture 3") are
+    only unique within a slide, so prefix the slide index; on the rare residual
+    clash append a counter. We control the refs end to end (the LLM echoes them,
+    rewriteImageLinks matches them), so the name need not match markitdown."""
+    base = re.sub(r"\W", "", shape.name or "image")
+    stem = f"slide{slide_index}-{base}"
+    name = f"{stem}.jpg"
+    counter = 2
+    while name in seen:
+        name = f"{stem}-{counter}.jpg"
+        counter += 1
+    seen.add(name)
+    return name
 
 
 def _picture_alt_text(shape):
@@ -570,6 +588,17 @@ def _table_markdown(table):
     for r in rows[1:]:
         lines.append("| " + " | ".join(r) + " |")
     return "\n".join(lines)
+
+
+def _slide_notes(slide):
+    """The slide's speaker-notes text, or "" — markitdown surfaces these, so the
+    structured path must too to avoid dropping content."""
+    try:
+        if not slide.has_notes_slide:
+            return ""
+        return (slide.notes_slide.notes_text_frame.text or "").strip()
+    except Exception:
+        return ""
 
 
 def _describe_image(image, env, client, prompt):
@@ -619,9 +648,10 @@ def _describe_image(image, env, client, prompt):
         return ""
 
 
-def _extract_slide_elements(slide, pics_dir):
+def _extract_slide_elements(slide, pics_dir, slide_index, seen):
     """Walk one slide's shapes (recursing groups) into ordered elements with
-    geometry, writing each picture's bytes to pics_dir. Returns
+    geometry, writing each picture's bytes to pics_dir under a deck-unique name
+    (`seen` tracks names already used across the whole deck). Returns
     (elements, pending_descriptions) where pending is a list of
     (element, pptx_image) whose description still needs an LLM call."""
     elements = []
@@ -635,7 +665,7 @@ def _extract_slide_elements(slide, pics_dir):
         except Exception:
             image = None
         if image is not None:
-            filename = _picture_filename(shape)
+            filename = _unique_picture_name(shape, slide_index, seen)
             dest = os.path.join(pics_dir, filename)
             try:
                 with open(dest, "wb") as fh:
@@ -707,12 +737,17 @@ def convert_pptx_structured(path, env):
     out_slides = []
     pictures = []
     pending = []
+    seen_names = set()
     for idx, slide in enumerate(prs.slides, 1):
-        elements, slide_pending = _extract_slide_elements(slide, pics_dir)
+        elements, slide_pending = _extract_slide_elements(slide, pics_dir, idx, seen_names)
         for element in elements:
             if element.get("type") == "picture":
                 pictures.append({"filename": element["filename"], "path": os.path.join(pics_dir, element["filename"])})
-        out_slides.append({"index": idx, "elements": elements})
+        slide_doc = {"index": idx, "elements": elements}
+        notes = _slide_notes(slide)
+        if notes:
+            slide_doc["notes"] = notes
+        out_slides.append(slide_doc)
         pending.extend(slide_pending)
 
     if describe_enabled and client is not None and pending:

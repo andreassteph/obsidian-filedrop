@@ -222,6 +222,38 @@ function getPageCount(absolutePath: string, pythonCommand: string): Promise<numb
 	});
 }
 
+// Count a .pptx's slides and embedded pictures up front (no blob reads) so the
+// PPTX subprocess timeout can be sized by the actual LLM workload — which is one
+// vision call per image, not per slide. Picture detection mirrors the extractor
+// (try shape.image, recurse groups) so placeholder images are counted too.
+function getPptxCounts(absolutePath: string, pythonCommand: string): Promise<{ slides: number; images: number } | null> {
+	if (!absolutePath.toLowerCase().endsWith('.pptx')) return Promise.resolve(null);
+	const script =
+		'import sys\n' +
+		'from pptx import Presentation\n' +
+		'def count(shapes):\n' +
+		'    n = 0\n' +
+		'    for s in shapes:\n' +
+		'        if getattr(s, "shape_type", None) == 6 and hasattr(s, "shapes"):\n' +
+		'            n += count(s.shapes)\n' +
+		'        else:\n' +
+		'            try:\n' +
+		'                _ = s.image; n += 1\n' +
+		'            except Exception:\n' +
+		'                pass\n' +
+		'    return n\n' +
+		'p = Presentation(sys.argv[1])\n' +
+		'slides = list(p.slides)\n' +
+		'print(f"{len(slides)} {sum(count(sl.shapes) for sl in slides)}")\n';
+	return new Promise((resolve) => {
+		execFile(pythonCommand, ['-c', script, absolutePath], { timeout: 15_000 }, (error: Error | null, stdout: string) => {
+			if (error) { resolve(null); return; }
+			const [s, i] = stdout.trim().split(/\s+/).map((n) => parseInt(n, 10));
+			resolve(isNaN(s) ? null : { slides: s, images: isNaN(i) ? 0 : i });
+		});
+	});
+}
+
 // Executables carry no extractable text, so ask the LLM what the file most
 // likely is from its name. The reply is an educated guess, flagged as such.
 function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
@@ -559,9 +591,12 @@ export async function convertPptx(
 		env.FILEDROP_LLM_VISION = getCapabilities(gateway).vision !== false ? '1' : '0';
 		env.FILEDROP_LLM_TEMPERATURE = getCapabilities(gateway).temperature !== false ? '1' : '0';
 		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
-		const slideCount = await getPageCount(absolutePath, pythonCommand);
-		timeout = slideCount != null
-			? Math.max(LLM_TIMEOUT_MS, slideCount * LLM_TIMEOUT_PER_PAGE_MS)
+		// LLM work is one vision call per image (4-way parallel in Python), so size
+		// the budget by whichever is larger: slide count or images/4.
+		const counts = await getPptxCounts(absolutePath, pythonCommand);
+		const driver = counts != null ? Math.max(counts.slides, Math.ceil(counts.images / 4)) : null;
+		timeout = driver != null
+			? Math.max(LLM_TIMEOUT_MS, driver * LLM_TIMEOUT_PER_PAGE_MS)
 			: LLM_TIMEOUT_MS;
 	}
 
