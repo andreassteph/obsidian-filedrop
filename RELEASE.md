@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.5.4 — Fix PPTX conversion timeout for large decks
+
+### Changes
+
+- Fix PPTX files timing out on large decks: apply a 12-minute subprocess budget (matching MSG) instead of the single-file 180s cap, since markitdown calls the LLM once per image sequentially across all slides
+
 ## 0.5.3 — External folder linking, PPTX support, and conversion reliability
 
 ### Changes
