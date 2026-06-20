@@ -93,6 +93,23 @@ export function sanitizeFilename(name: string, fallback: string): string {
 	return cleaned.length > 0 ? cleaned : fallback;
 }
 
+// Prefix a subfolder onto the bare image references the PPTX structure step
+// emits (`![desc](Picture19.jpg)`), so they point at `<dir>/Picture19.jpg` where
+// the extracted pictures were copied. Only rewrites links whose target matches
+// one of `filenames` (leaves data-URI / http / unrelated embeds untouched). The
+// new destination is run through encodeURI so a `dirName` containing spaces
+// (note names can) stays a valid markdown URL; encodeURI preserves `/`.
+export function rewriteImageLinks(markdown: string, dirName: string, filenames: Iterable<string>): string {
+	const known = new Set(filenames);
+	if (known.size === 0) return markdown;
+	return markdown.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt: string, target: string) => {
+		let decoded = target.trim();
+		try { decoded = decodeURIComponent(decoded); } catch { /* leave as-is */ }
+		if (!known.has(decoded)) return match;
+		return `![${alt}](${encodeURI(`${dirName}/${decoded}`)})`;
+	});
+}
+
 // Rewrite the frontmatter `tags` field to an inline JSON array of quoted strings,
 // e.g. `tags: ["a","b"]`. Obsidian's Properties editor re-serializes tags as a
 // multi-line YAML block list (`tags:\n  - a\n  - b`); we match that whole block —

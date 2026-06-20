@@ -498,9 +498,259 @@ def describe(path, env):
     return response.choices[0].message.content or ""
 
 
+# ---------------------------------------------------------------------------
+# Structure-aware PPTX extraction
+#
+# markitdown flattens a slide's shapes into plain paragraphs in stored z-order
+# and emits `![desc](PictureN.jpg)` references whose image bytes it never writes.
+# Here we read the deck with python-pptx instead: every shape keeps its geometry
+# (so the TS side can reconstruct columns / reading order via the LLM) and every
+# embedded picture's bytes are written to a temp dir under the *same* name
+# markitdown would reference, so the links resolve once copied into the vault.
+# ---------------------------------------------------------------------------
+
+DEFAULT_IMAGE_PROMPT = (
+    "Describe this image concisely for use as markdown alt text. "
+    "One or two sentences focused on the meaningful content; no preamble."
+)
+
+
+def _iter_shapes(shapes):
+    """Yield every shape, recursing into group shapes (depth-first, document
+    order) so pictures/text nested inside groups aren't missed. MSO_SHAPE_TYPE
+    .GROUP == 6; checking the attribute as well stays robust across versions."""
+    for shape in shapes:
+        if getattr(shape, "shape_type", None) == 6 and hasattr(shape, "shapes"):
+            yield from _iter_shapes(shape.shapes)
+        else:
+            yield shape
+
+
+def _emu(value):
+    """Coerce a python-pptx length (EMU) to int, or None when unset."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _shape_geometry(shape):
+    return {
+        "left": _emu(getattr(shape, "left", None)),
+        "top": _emu(getattr(shape, "top", None)),
+        "width": _emu(getattr(shape, "width", None)),
+        "height": _emu(getattr(shape, "height", None)),
+    }
+
+
+def _picture_filename(shape):
+    """Match markitdown's PPTX picture naming so the emitted links resolve."""
+    return re.sub(r"\W", "", shape.name or "image") + ".jpg"
+
+
+def _picture_alt_text(shape):
+    """The author-provided alt text on a picture, if any (matches markitdown)."""
+    try:
+        return shape._element._nvXxPr.cNvPr.get("descr") or ""
+    except Exception:
+        return ""
+
+
+def _table_markdown(table):
+    """Render a pptx table as a GitHub-flavored markdown table."""
+    rows = []
+    for row in table.rows:
+        rows.append([" ".join((cell.text or "").split()) for cell in row.cells])
+    if not rows:
+        return ""
+    width = max(len(r) for r in rows)
+    rows = [r + [""] * (width - len(r)) for r in rows]
+    lines = ["| " + " | ".join(rows[0]) + " |",
+             "| " + " | ".join("---" for _ in range(width)) + " |"]
+    for r in rows[1:]:
+        lines.append("| " + " | ".join(r) + " |")
+    return "\n".join(lines)
+
+
+def _describe_image(image, env, client, prompt):
+    """Return a short LLM description of a python-pptx Image, or "" on failure.
+    Large blobs are re-encoded as compressed JPEG (reusing the PDF-page 413
+    guard) so the payload stays under the gateway's request-size limit."""
+    import base64
+
+    blob = image.blob
+    content_type = getattr(image, "content_type", None) or "image/png"
+    max_bytes, quality, min_dim = _image_limits(env)
+    if len(blob) > max_bytes:
+        try:
+            import fitz  # pymupdf  # type: ignore
+            import tempfile
+
+            fd, tmp = tempfile.mkstemp()
+            try:
+                os.write(fd, blob)
+            finally:
+                os.close(fd)
+            try:
+                blob = _jpeg_bytes_under_cap(fitz.Pixmap(tmp), quality, max_bytes, min_dim)
+                content_type = "image/jpeg"
+            finally:
+                os.remove(tmp)
+        except Exception as exc:
+            print(f"[filedrop] pptx image compression skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
+
+    b64 = base64.b64encode(blob).decode("ascii")
+    try:
+        resp = client.chat.completions.create(
+            model=env["FILEDROP_LLM_MODEL"],
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
+                ],
+            }],
+            **_token_kwargs(env, 1024),
+            **_temperature_kwargs(env),
+        )
+        return strip_thinking((resp.choices[0].message.content or "").strip())
+    except Exception as exc:
+        print(f"[filedrop] pptx image description failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return ""
+
+
+def _extract_slide_elements(slide, pics_dir):
+    """Walk one slide's shapes (recursing groups) into ordered elements with
+    geometry, writing each picture's bytes to pics_dir. Returns
+    (elements, pending_descriptions) where pending is a list of
+    (element, pptx_image) whose description still needs an LLM call."""
+    elements = []
+    pending = []
+    for shape in _iter_shapes(slide.shapes):
+        geom = _shape_geometry(shape)
+
+        image = None
+        try:
+            image = shape.image  # raises on non-picture shapes
+        except Exception:
+            image = None
+        if image is not None:
+            filename = _picture_filename(shape)
+            dest = os.path.join(pics_dir, filename)
+            try:
+                with open(dest, "wb") as fh:
+                    fh.write(image.blob)
+            except OSError as exc:
+                print(f"[filedrop] failed writing pptx image {filename}: {exc}", file=sys.stderr)
+                continue
+            alt = _picture_alt_text(shape)
+            element = {"type": "picture", "geom": geom, "filename": filename, "description": alt}
+            elements.append(element)
+            if not alt:
+                pending.append((element, image))
+            continue
+
+        if getattr(shape, "has_table", False):
+            md = _table_markdown(shape.table)
+            if md:
+                elements.append({"type": "table", "geom": geom, "markdown": md})
+            continue
+
+        if getattr(shape, "has_text_frame", False):
+            paragraphs = []
+            for para in shape.text_frame.paragraphs:
+                text = "".join(run.text for run in para.runs) if para.runs else (para.text or "")
+                text = text.strip()
+                if text:
+                    paragraphs.append({"text": text, "level": getattr(para, "level", 0) or 0})
+            if paragraphs:
+                elements.append({"type": "text", "geom": geom, "paragraphs": paragraphs})
+            continue
+
+    return elements, pending
+
+
+def convert_pptx_structured(path, env):
+    """Extract a .pptx into structured per-slide JSON plus its embedded images.
+
+    Returns {"slides": [...], "pictures": [{"filename", "path"}]} where pictures
+    live in a fresh temp dir (the TS side copies them into the vault and removes
+    the dir). Returns None to signal the caller should fall back to markitdown
+    (python-pptx unavailable, or the deck can't be opened)."""
+    try:
+        from pptx import Presentation
+    except ImportError:
+        print("[filedrop] python-pptx not installed — falling back to markitdown for pptx", file=sys.stderr)
+        return None
+    try:
+        prs = Presentation(path)
+    except Exception as exc:
+        print(f"[filedrop] could not open pptx: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None
+
+    import tempfile
+
+    pics_dir = tempfile.mkdtemp(prefix="filedrop_pptx_")
+    describe_enabled = _llm_configured(env) and _vision_enabled(env)
+    client = None
+    if describe_enabled:
+        try:
+            client = _make_client(env)
+            _install_thinking_filter(client)
+        except Exception as exc:
+            print(f"[filedrop] LLM client unavailable for pptx images: {type(exc).__name__}: {exc}", file=sys.stderr)
+            describe_enabled = False
+
+    image_prompt = env.get("FILEDROP_LLM_PROMPT") or DEFAULT_IMAGE_PROMPT
+
+    _emit_phase("markitdown")
+    out_slides = []
+    pictures = []
+    pending = []
+    for idx, slide in enumerate(prs.slides, 1):
+        elements, slide_pending = _extract_slide_elements(slide, pics_dir)
+        for element in elements:
+            if element.get("type") == "picture":
+                pictures.append({"filename": element["filename"], "path": os.path.join(pics_dir, element["filename"])})
+        out_slides.append({"index": idx, "elements": elements})
+        pending.extend(slide_pending)
+
+    if describe_enabled and client is not None and pending:
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        _emit_phase("llm-image")
+        total = len(pending)
+        show_progress = total > PAGE_PROGRESS_THRESHOLD
+        lock = threading.Lock()
+        completed = 0
+
+        def _run(item):
+            nonlocal completed
+            element, image = item
+            element["description"] = _describe_image(image, env, client, image_prompt)
+            if show_progress:
+                with lock:
+                    completed += 1
+                    _emit_progress(completed, total)
+
+        with ThreadPoolExecutor(max_workers=min(4, total)) as pool:
+            list(pool.map(_run, pending))
+
+    return {"slides": out_slides, "pictures": pictures}
+
+
 def main(argv=None, env=None):
     argv = sys.argv if argv is None else argv
     env = os.environ if env is None else env
+    if len(argv) > 2 and argv[1] == "--pptx":
+        import json
+
+        result = convert_pptx_structured(argv[2], env)
+        # Empty stdout signals the TS side to fall back to markitdown.
+        if result is not None:
+            sys.stdout.buffer.write(json.dumps(result).encode("utf-8"))
+        return
     path = argv[1]
     if env.get("FILEDROP_DESCRIBE"):
         result = describe(path, env)

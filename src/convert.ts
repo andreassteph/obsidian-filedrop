@@ -2,7 +2,7 @@ import { Notice } from 'obsidian';
 
 import convertScript from '../python/filedrop_convert.py';
 import msgScript from '../python/filedrop_msg.py';
-import { LlmGateway, getCapabilities, isGatewayEnabled, isGatewayUrlSecure } from './settings';
+import { LlmGateway, SlideDoc, getCapabilities, isGatewayEnabled, isGatewayUrlSecure } from './settings';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
@@ -511,6 +511,89 @@ export async function runMsgConversion(
 						),
 						attachments: [],
 					});
+				}
+			},
+			onProgress,
+		);
+	});
+}
+
+export interface PictureFile {
+	filename: string;
+	// Absolute path to the extracted image bytes in a temp dir created by the
+	// Python helper. The TS consumer copies it into the vault then deletes the
+	// dir — same temp-file handoff as MsgAttachment.
+	tempPath: string;
+}
+
+export interface PptxStructuredResult {
+	slides: SlideDoc[];
+	pictures: PictureFile[];
+}
+
+// Extract a .pptx into structured per-slide data plus its embedded images via
+// python/filedrop_convert.py (--pptx mode). Returns null when the structured
+// path is unavailable (python-pptx missing, deck unreadable, or any failure) so
+// the caller falls back to runMarkitdown. Image extraction runs even without a
+// gateway; LLM image descriptions are added only when a secure gateway is set.
+export async function convertPptx(
+	absolutePath: string,
+	pythonCommand: string,
+	gateway: LlmGateway | null,
+	onPhase?: OnPhase,
+	onProgress?: OnProgress,
+): Promise<PptxStructuredResult | null> {
+	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
+		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting PPTX without LLM.');
+	}
+	const useGateway = !!gateway && isGatewayEnabled(gateway) && isGatewayUrlSecure(gateway.baseUrl);
+
+	const env: NodeJS.ProcessEnv = { ...process.env, PYTHONUTF8: '1' };
+	let timeout = MARKITDOWN_TIMEOUT_MS;
+	if (useGateway && gateway) {
+		env.FILEDROP_LLM_URL = gateway.baseUrl;
+		env.FILEDROP_LLM_KEY = gateway.apiKey;
+		env.FILEDROP_LLM_MODEL = gateway.model;
+		env.FILEDROP_LLM_PROMPT = gateway.prompt;
+		env.FILEDROP_LLM_TOKEN_PARAM = getCapabilities(gateway).tokenParam;
+		env.FILEDROP_LLM_VISION = getCapabilities(gateway).vision !== false ? '1' : '0';
+		env.FILEDROP_LLM_TEMPERATURE = getCapabilities(gateway).temperature !== false ? '1' : '0';
+		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
+		const slideCount = await getPageCount(absolutePath, pythonCommand);
+		timeout = slideCount != null
+			? Math.max(LLM_TIMEOUT_MS, slideCount * LLM_TIMEOUT_PER_PAGE_MS)
+			: LLM_TIMEOUT_MS;
+	}
+
+	return new Promise((resolve) => {
+		runWithPhases(
+			pythonCommand,
+			['-c', convertScript, '--pptx', absolutePath],
+			{ timeout, maxBuffer: 200 * 1024 * 1024, env },
+			onPhase,
+			(error, stdout, stderr) => {
+				if (error) {
+					console.error('FileDrop convertPptx failed:', subprocessErrorDetail(error, stderr, stdout, timeout));
+					resolve(null);
+					return;
+				}
+				// Empty stdout is the Python helper's signal to fall back to markitdown.
+				if (!stdout.trim()) {
+					resolve(null);
+					return;
+				}
+				try {
+					const parsed = JSON.parse(stdout) as {
+						slides: SlideDoc[];
+						pictures: Array<{ filename: string; path: string }>;
+					};
+					resolve({
+						slides: parsed.slides ?? [],
+						pictures: (parsed.pictures ?? []).map((p) => ({ filename: p.filename, tempPath: p.path })),
+					});
+				} catch (e) {
+					console.error('FileDrop convertPptx: could not parse output as JSON:', e);
+					resolve(null);
 				}
 			},
 			onProgress,
