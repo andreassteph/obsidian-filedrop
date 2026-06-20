@@ -8,3 +8,6 @@ __pycache__/
 .venv/
 python/manual.cfg
 uv.lock
+*.pptx
+*.docx
+*.msg
