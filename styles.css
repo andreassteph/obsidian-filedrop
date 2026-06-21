@@ -109,6 +109,22 @@
 
 .filedrop-currentnote-section {
   flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filedrop-currentnote-header {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.filedrop-currentnote-label {
+  font-size: var(--font-ui-small);
+  color: var(--text-muted);
+  flex-shrink: 0;
 }
 
 .filedrop-currentnote-path {
@@ -116,14 +132,38 @@
   color: var(--text-muted);
   word-break: break-all;
   line-height: 1.4;
-  padding: 2px 0;
 }
 
 .filedrop-currentnote-actions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 4px;
   align-items: center;
+}
+
+.filedrop-currentnote-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  padding: 4px;
+  line-height: 1;
+  box-shadow: none;
+  border-radius: 4px;
+  --icon-size: 16px;
+}
+
+.filedrop-currentnote-action:hover {
+  color: var(--interactive-accent);
+  background-color: var(--background-modifier-hover);
+}
+
+.filedrop-currentnote-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Update filelist button */
@@ -342,17 +382,7 @@
   cursor: not-allowed;
 }
 
-.filedrop-entry-summary-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-
-.filedrop-update-btn,
-.filedrop-entry-summary,
-.filedrop-entry-suggest-tags,
-.filedrop-entry-add-refs {
+.filedrop-update-btn {
   font-size: var(--font-ui-smaller);
   background: none;
   border: 1px solid var(--background-modifier-border);
@@ -364,18 +394,12 @@
   box-shadow: none;
 }
 
-.filedrop-update-btn:hover,
-.filedrop-entry-summary:hover,
-.filedrop-entry-suggest-tags:hover,
-.filedrop-entry-add-refs:hover {
+.filedrop-update-btn:hover {
   color: var(--interactive-accent);
   border-color: var(--interactive-accent);
 }
 
-.filedrop-update-btn:disabled,
-.filedrop-entry-summary:disabled,
-.filedrop-entry-suggest-tags:disabled,
-.filedrop-entry-add-refs:disabled {
+.filedrop-update-btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -508,24 +532,6 @@
 
 .filedrop-ref-add-cond:hover {
   color: var(--interactive-accent);
-  border-color: var(--interactive-accent);
-}
-
-/* Tags */
-
-.filedrop-tag-input {
-  font-size: var(--font-ui-smaller);
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 4px;
-  padding: 1px 6px;
-  background: var(--background-primary);
-  color: var(--text-normal);
-  outline: none;
-  width: 80px;
-  box-shadow: none;
-}
-
-.filedrop-tag-input:focus {
   border-color: var(--interactive-accent);
 }
 

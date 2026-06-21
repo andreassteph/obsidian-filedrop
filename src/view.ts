@@ -1,8 +1,8 @@
 import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
-import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
+import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
-import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote, ActivityMetadata } from './references';
+import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
 import { ReferenceModal } from './reference-modal';
 import type FileDropPlugin from '../main';
 
@@ -44,57 +44,17 @@ export class FileDropView extends ItemView {
 			this.selectedGatewayId = this.modelSelectEl!.value || null;
 		});
 
-		// Collapsible "Current note" section (above drop area, starts collapsed)
-		this.currentNoteSection = container.createDiv({ cls: 'filedrop-droparea filedrop-currentnote-section filedrop-droparea--collapsed' });
-		const currentNoteHeader = this.currentNoteSection.createDiv({ cls: 'filedrop-droparea-header' });
-		currentNoteHeader.createSpan({ cls: 'filedrop-droparea-caret', text: '▾' });
-		currentNoteHeader.createSpan({ cls: 'filedrop-droparea-title', text: 'Current note' });
-		currentNoteHeader.addEventListener('click', () => {
-			this.currentNoteSection!.toggleClass('filedrop-droparea--collapsed', !this.currentNoteSection!.hasClass('filedrop-droparea--collapsed'));
-		});
-		const currentNoteBody = this.currentNoteSection.createDiv({ cls: 'filedrop-droparea-body' });
-		this.currentNotePathEl = currentNoteBody.createDiv({ cls: 'filedrop-currentnote-path', text: 'No note open' });
-		this.currentNoteActionRow = currentNoteBody.createDiv({ cls: 'filedrop-currentnote-actions' });
+		// "Current note" section (above drop area, always visible)
+		this.currentNoteSection = container.createDiv({ cls: 'filedrop-currentnote-section' });
+		const currentNoteHeader = this.currentNoteSection.createDiv({ cls: 'filedrop-currentnote-header' });
+		currentNoteHeader.createSpan({ cls: 'filedrop-currentnote-label', text: 'Current note' });
+		this.currentNotePathEl = currentNoteHeader.createSpan({ cls: 'filedrop-currentnote-path', text: 'No note open' });
+		this.currentNoteActionRow = this.currentNoteSection.createDiv({ cls: 'filedrop-currentnote-actions' });
 
-		const cnSummaryBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-summary', text: 'Add summary' });
-		cnSummaryBtn.title = 'Generate summary with the selected LLM';
-		cnSummaryBtn.addEventListener('click', async () => {
-			cnSummaryBtn.disabled = true;
-			cnSummaryBtn.setText('Summarizing…');
-			try {
-				await this.summarizeCurrentNote();
-			} finally {
-				cnSummaryBtn.disabled = false;
-				cnSummaryBtn.setText('Add summary');
-			}
-		});
-
-		const cnTagsBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-suggest-tags', text: 'Suggest tags' });
-		cnTagsBtn.title = 'Suggest tags with the selected LLM';
-		cnTagsBtn.addEventListener('click', async () => {
-			cnTagsBtn.disabled = true;
-			cnTagsBtn.setText('Suggesting…');
-			try {
-				await this.suggestTagsForCurrentNote();
-			} finally {
-				cnTagsBtn.disabled = false;
-				cnTagsBtn.setText('Suggest tags');
-			}
-		});
-
+		this.createIconActionButton(this.currentNoteActionRow, 'file-text', 'Generate summary with the selected LLM', () => this.summarizeCurrentNote());
+		this.createIconActionButton(this.currentNoteActionRow, 'tags', 'Suggest tags with the selected LLM', () => this.suggestTagsForCurrentNote());
 		if (this.plugin.settings.referenceGroups.length > 0) {
-			const cnRefsBtn = this.currentNoteActionRow.createEl('button', { cls: 'filedrop-entry-add-refs', text: 'Add references' });
-			cnRefsBtn.title = 'Find and add references to matching notes';
-			cnRefsBtn.addEventListener('click', async () => {
-				cnRefsBtn.disabled = true;
-				cnRefsBtn.setText('Finding references…');
-				try {
-					await this.addReferencesForCurrentNote();
-				} finally {
-					cnRefsBtn.disabled = false;
-					cnRefsBtn.setText('Add references');
-				}
-			});
+			this.createIconActionButton(this.currentNoteActionRow, 'link', 'Find and add references to matching notes', () => this.addReferencesForCurrentNote());
 		}
 
 		this.updateCurrentNotePanel(this.app.workspace.getActiveFile());
@@ -338,6 +298,26 @@ export class FileDropView extends ItemView {
 		).open();
 	}
 
+	// Build a compact icon button for a current-note action. While the async
+	// handler runs, the icon is swapped for a spinner and the button disabled.
+	private createIconActionButton(parent: HTMLElement, icon: string, tooltip: string, handler: () => Promise<void>): HTMLButtonElement {
+		const btn = parent.createEl('button', { cls: 'filedrop-currentnote-action' });
+		setIcon(btn, icon);
+		btn.title = tooltip;
+		btn.setAttribute('aria-label', tooltip);
+		btn.addEventListener('click', async () => {
+			btn.disabled = true;
+			setIcon(btn, 'loader');
+			try {
+				await handler();
+			} finally {
+				btn.disabled = false;
+				setIcon(btn, icon);
+			}
+		});
+		return btn;
+	}
+
 	private updateCurrentNotePanel(file: TFile | null): void {
 		if (!this.currentNotePathEl || !this.currentNoteActionRow) return;
 		const isMarkdown = file instanceof TFile && file.extension === 'md';
@@ -440,80 +420,6 @@ export class FileDropView extends ItemView {
 		rerunBtn.addEventListener('click', async () => {
 			await this.plugin.rerunConversion(entry, this.selectedGatewayId);
 		});
-
-		const summaryRow = entryEl.createDiv({ cls: 'filedrop-entry-summary-row' });
-		const hasSummary = this.entryHasSummary(entry);
-		const summaryLabel = hasSummary ? 'Change summary' : 'Add summary';
-		const summaryBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-summary', text: summaryLabel });
-		summaryBtn.title = hasSummary
-			? 'Revise the existing summary with the selected LLM'
-			: 'Generate summary with the selected LLM';
-		summaryBtn.disabled = inProgress;
-		summaryBtn.addEventListener('click', async () => {
-			if (this.entryHasSummary(entry)) {
-				await this.changeSummaryForEntry(entry, summaryBtn);
-				return;
-			}
-			summaryBtn.disabled = true;
-			summaryBtn.setText('Summarizing…');
-			try {
-				await this.summarizeEntry(entry);
-			} finally {
-				summaryBtn.disabled = false;
-				summaryBtn.setText(this.entryHasSummary(entry) ? 'Change summary' : 'Add summary');
-			}
-		});
-
-		const suggestBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-suggest-tags', text: 'Suggest tags' });
-		suggestBtn.title = 'Suggest tags with the selected LLM';
-		suggestBtn.disabled = inProgress;
-		suggestBtn.addEventListener('click', async () => {
-			suggestBtn.disabled = true;
-			suggestBtn.setText('Suggesting…');
-			try {
-				await this.suggestTagsForEntry(entry, index);
-			} finally {
-				suggestBtn.disabled = false;
-				suggestBtn.setText('Suggest tags');
-			}
-		});
-
-		if (this.plugin.settings.referenceGroups.length > 0) {
-			const refsBtn = summaryRow.createEl('button', { cls: 'filedrop-entry-add-refs', text: 'Add references' });
-			refsBtn.title = 'Find and add references to matching notes';
-			refsBtn.disabled = inProgress;
-			refsBtn.addEventListener('click', async () => {
-				refsBtn.disabled = true;
-				refsBtn.setText('Finding references…');
-				try {
-					await this.addReferencesForEntry(entry);
-				} finally {
-					refsBtn.disabled = false;
-					refsBtn.setText('Add references');
-				}
-			});
-		}
-
-		const tagInput = summaryRow.createEl('input', { cls: 'filedrop-tag-input' });
-		tagInput.type = 'text';
-		tagInput.placeholder = 'add tag…';
-		tagInput.addEventListener('keydown', async (e) => {
-			if (e.key === 'Enter') {
-				const val = tagInput.value.trim();
-				if (val && !entry.tags.includes(val)) {
-					await this.updateEntryTags(index, [...entry.tags, val]);
-				}
-			}
-		});
-	}
-
-	private async addReferencesForEntry(entry: DroppedFile): Promise<void> {
-		const noteFile = this.app.vault.getAbstractFileByPath(entry.notePath);
-		if (!(noteFile instanceof TFile)) {
-			new Notice('FileDrop: could not find the note.');
-			return;
-		}
-		await this.addReferencesForNote(noteFile, entry.filePath);
 	}
 
 	private async addReferencesForNote(noteFile: TFile, sourceFilePath?: string): Promise<void> {
@@ -611,13 +517,6 @@ export class FileDropView extends ItemView {
 		this.renderFileList();
 	}
 
-	private async updateEntryTags(index: number, newTags: string[]): Promise<void> {
-		this.plugin.recentFiles[index].tags = newTags;
-		await this.plugin.saveSettings();
-		await this.rewriteNoteTags(this.plugin.recentFiles[index].notePath, newTags);
-		this.renderFileList();
-	}
-
 	private async removeEntry(index: number): Promise<void> {
 		const entry = this.plugin.recentFiles[index];
 		// External entries reference a raw file outside the vault that we don't
@@ -651,137 +550,6 @@ export class FileDropView extends ItemView {
 			'no-reply': 'the LLM returned an empty response',
 		};
 		return base[reason];
-	}
-
-	private entryHasSummary(entry: DroppedFile): boolean {
-		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
-		if (!(file instanceof TFile)) return false;
-		const summary = this.app.metadataCache.getFileCache(file)?.frontmatter?.summary;
-		return typeof summary === 'string' && summary.trim().length > 0;
-	}
-
-	private async changeSummaryForEntry(entry: DroppedFile, summaryBtn: HTMLButtonElement): Promise<void> {
-		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
-		if (!gateway || !isGatewayEnabled(gateway)) {
-			new Notice('FileDrop: select an LLM model first.');
-			return;
-		}
-
-		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
-		if (!(file instanceof TFile)) {
-			new Notice('FileDrop: could not find the note to summarize.');
-			return;
-		}
-
-		const currentSummary = String(this.app.metadataCache.getFileCache(file)?.frontmatter?.summary ?? '');
-		const persist = () => this.plugin.saveSettings();
-
-		summaryBtn.disabled = true;
-
-		const onRevise = async (baseSummary: string, instruction: string): Promise<ReviseResult> => {
-			const content = await this.app.vault.read(file);
-			const i = content.indexOf('\n---\n');
-			const body = i >= 0 ? content.slice(i + 5) : content;
-
-			// Revising the summary and re-deriving metadata are independent (both
-			// read only `body`), so run them concurrently.
-			let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
-			const [result, fillResult] = await Promise.all([
-				reviseSummary(body, baseSummary, instruction, gateway, undefined, persist),
-				fillMetadataWithLLM(metadata, body, gateway, persist),
-			]);
-			if (!result.ok) {
-				return { ok: false, message: this.llmErrorMessage(result.reason, result.detail) };
-			}
-			if (fillResult.ok) metadata = fillResult.value;
-
-			return { ok: true, summary: result.value, metadata };
-		};
-
-		const onAccept = async (summary: string, metadata: ActivityMetadata): Promise<void> => {
-			await this.writeNoteSummaryAndMetadata(entry.notePath, summary, metadata);
-			new Notice('FileDrop: summary updated.');
-		};
-
-		const onClose = () => {
-			summaryBtn.disabled = false;
-			summaryBtn.setText(this.entryHasSummary(entry) ? 'Change summary' : 'Add summary');
-		};
-
-		new ChangeSummaryModal(this.app, currentSummary, onRevise, onAccept, onClose).open();
-	}
-
-	private async summarizeEntry(entry: DroppedFile): Promise<void> {
-		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
-		if (!gateway || !isGatewayEnabled(gateway)) {
-			new Notice('FileDrop: select an LLM model first.');
-			return;
-		}
-
-		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
-		if (!(file instanceof TFile)) {
-			new Notice('FileDrop: could not find the note to summarize.');
-			return;
-		}
-
-		const content = await this.app.vault.read(file);
-		const i = content.indexOf('\n---\n');
-		const body = i >= 0 ? content.slice(i + 5) : content;
-
-		// Extract summary
-		// Summary and metadata-fill both read only `body` and are independent, so
-		// kick them off together. Extract metadata first to know whether a fill is needed.
-		let metadata = extractActivityMetadata(body, entry.filePath, file.stat);
-		const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
-		const fillPromise = (isGatewayEnabled(gateway) && hasNullMetadata)
-			? fillMetadataWithLLM(metadata, body, gateway, () => this.plugin.saveSettings())
-			: null;
-
-		const [result, fillResult] = await Promise.all([
-			summarizeContent(body, gateway, undefined, () => this.plugin.saveSettings()),
-			fillPromise,
-		]);
-		if (!result.ok) {
-			new Notice(`FileDrop: could not generate a summary — ${this.llmErrorMessage(result.reason, result.detail)}.`);
-			return;
-		}
-		if (fillResult?.ok) metadata = fillResult.value;
-
-		// Save summary and metadata to frontmatter
-		await this.writeNoteSummaryAndMetadata(entry.notePath, result.value, metadata);
-		new Notice('FileDrop: summary added.');
-	}
-
-	private async suggestTagsForEntry(entry: DroppedFile, index: number): Promise<void> {
-		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
-		if (!gateway || !isGatewayEnabled(gateway)) {
-			new Notice('FileDrop: select an LLM model first.');
-			return;
-		}
-
-		const file = this.app.vault.getAbstractFileByPath(entry.notePath);
-		if (!(file instanceof TFile)) {
-			new Notice('FileDrop: could not find the note to tag.');
-			return;
-		}
-
-		const content = await this.app.vault.read(file);
-		const i = content.indexOf('\n---\n');
-		const body = i >= 0 ? content.slice(i + 5) : content;
-
-		const result = await suggestTags(body, gateway, parsePreferredTags(this.plugin.settings.preferredTags), undefined, () => this.plugin.saveSettings());
-		if (!result.ok) {
-			new Notice(`FileDrop: could not suggest tags — ${this.llmErrorMessage(result.reason, result.detail)}.`);
-			return;
-		}
-		if (result.value.length === 0) {
-			new Notice('FileDrop: the LLM suggested no tags for this content.');
-			return;
-		}
-
-		const merged = Array.from(new Set([...entry.tags, ...result.value]));
-		await this.updateEntryTags(index, merged);
-		new Notice('FileDrop: tags suggested.');
 	}
 
 	private async summarizeCurrentNote(): Promise<void> {
@@ -937,175 +705,6 @@ export class FileDropView extends ItemView {
 		const content = await this.app.vault.read(file);
 		const updated = content.replace(/^verified:.*$/m, 'verified: true');
 		await this.app.vault.modify(file, updated);
-	}
-}
-
-type ReviseResult =
-	| { ok: true; summary: string; metadata: ActivityMetadata }
-	| { ok: false; message: string };
-
-const SUMMARY_PRESETS: { label: string; instruction: string }[] = [
-	{ label: 'Shorter', instruction: 'Make the summary shorter and more concise.' },
-	{ label: 'Longer', instruction: 'Make the summary longer and more detailed.' },
-	{ label: 'Simpler', instruction: 'Rewrite the summary in plain, simpler language.' },
-];
-
-class ChangeSummaryModal extends Modal {
-	private proposedSummary = '';
-	private proposedMetadata: ActivityMetadata = { date: null, type: null, people: null };
-
-	constructor(
-		app: App,
-		private readonly originalSummary: string,
-		private readonly onRevise: (baseSummary: string, instruction: string) => Promise<ReviseResult>,
-		private readonly onAccept: (summary: string, metadata: ActivityMetadata) => Promise<void>,
-		private readonly onCloseCb: () => void,
-	) {
-		super(app);
-	}
-
-	onOpen(): void {
-		this.renderInstructionStep();
-	}
-
-	private renderInstructionStep(): void {
-		this.contentEl.empty();
-		this.contentEl.createEl('h3', { text: 'Change summary' });
-		this.contentEl.createEl('p', {
-			cls: 'filedrop-change-summary-current',
-			text: this.originalSummary,
-		});
-		this.contentEl.createEl('p', {
-			text: 'Describe how the summary should be changed. The LLM revises it using the full document and the current summary as context.',
-		});
-
-		const input = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
-		input.placeholder = 'e.g. focus on the financial figures, mention the deadline…';
-		input.rows = 4;
-
-		const presets = this.contentEl.createDiv({ cls: 'filedrop-change-summary-presets' });
-		for (const preset of SUMMARY_PRESETS) {
-			const presetBtn = presets.createEl('button', { text: preset.label });
-			presetBtn.addEventListener('click', () => {
-				const existing = input.value.trim();
-				input.value = existing ? `${existing}\n${preset.instruction}` : preset.instruction;
-				input.focus();
-			});
-		}
-
-		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
-		const cancelBtn = buttons.createEl('button', { text: 'Cancel' });
-		cancelBtn.addEventListener('click', () => this.close());
-		const submitBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Change summary' });
-		const submit = async () => {
-			const instruction = input.value.trim();
-			if (!instruction) {
-				new Notice('FileDrop: describe how the summary should change.');
-				return;
-			}
-			await this.runRevise(this.originalSummary, instruction, submitBtn, [cancelBtn, ...Array.from(presets.children) as HTMLButtonElement[]]);
-		};
-		submitBtn.addEventListener('click', submit);
-		input.addEventListener('keydown', (e) => {
-			if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-				e.preventDefault();
-				void submit();
-			}
-		});
-
-		window.setTimeout(() => input.focus(), 0);
-	}
-
-	private renderPreviewStep(): void {
-		this.contentEl.empty();
-		this.contentEl.createEl('h3', { text: 'Review summary' });
-
-		const compare = this.contentEl.createDiv({ cls: 'filedrop-summary-compare' });
-		const oldCol = compare.createDiv({ cls: 'filedrop-summary-compare-col' });
-		oldCol.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Current' });
-		oldCol.createEl('p', { cls: 'filedrop-change-summary-current', text: this.originalSummary });
-		const newCol = compare.createDiv({ cls: 'filedrop-summary-compare-col' });
-		newCol.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Proposed' });
-		newCol.createEl('p', { cls: 'filedrop-change-summary-current', text: this.proposedSummary });
-
-		const meta = this.contentEl.createDiv({ cls: 'filedrop-summary-meta' });
-		meta.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'New metadata' });
-		const people = this.proposedMetadata.people;
-		const metaRows: [string, string][] = [
-			['Date', this.proposedMetadata.date ?? '—'],
-			['Type', this.proposedMetadata.type ?? '—'],
-			['People', people && people.length > 0 ? people.join(', ') : '—'],
-		];
-		const list = meta.createEl('ul', { cls: 'filedrop-summary-meta-list' });
-		for (const [key, value] of metaRows) {
-			list.createEl('li', { text: `${key}: ${value}` });
-		}
-
-		this.contentEl.createEl('p', {
-			text: 'Not quite right? Add another instruction and regenerate, or accept the proposed summary.',
-		});
-		const refine = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
-		refine.placeholder = 'e.g. keep it to two sentences…';
-		refine.rows = 3;
-
-		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
-		const discardBtn = buttons.createEl('button', { text: 'Discard' });
-		discardBtn.addEventListener('click', () => this.close());
-		const regenBtn = buttons.createEl('button', { text: 'Regenerate' });
-		regenBtn.addEventListener('click', async () => {
-			const instruction = refine.value.trim();
-			if (!instruction) {
-				new Notice('FileDrop: describe how to refine the summary.');
-				return;
-			}
-			await this.runRevise(this.proposedSummary, instruction, regenBtn, [discardBtn, acceptBtn]);
-		});
-		const acceptBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Accept' });
-		acceptBtn.addEventListener('click', async () => {
-			acceptBtn.disabled = true;
-			acceptBtn.setText('Saving…');
-			try {
-				await this.onAccept(this.proposedSummary, this.proposedMetadata);
-				this.close();
-			} finally {
-				acceptBtn.disabled = false;
-				acceptBtn.setText('Accept');
-			}
-		});
-	}
-
-	// Run a revise call with a loading state on `actionBtn`; on success store the
-	// proposal and (re-)render the preview step.
-	private async runRevise(
-		baseSummary: string,
-		instruction: string,
-		actionBtn: HTMLButtonElement,
-		otherBtns: HTMLButtonElement[],
-	): Promise<void> {
-		const originalText = actionBtn.textContent ?? '';
-		actionBtn.disabled = true;
-		actionBtn.setText('Revising…');
-		for (const b of otherBtns) b.disabled = true;
-		try {
-			const result = await this.onRevise(baseSummary, instruction);
-			if (!result.ok) {
-				new Notice(`FileDrop: could not change the summary — ${result.message}.`);
-				return;
-			}
-			this.proposedSummary = result.summary;
-			this.proposedMetadata = result.metadata;
-			this.renderPreviewStep();
-		} finally {
-			// Buttons that still exist (failure path stays on the same step).
-			actionBtn.disabled = false;
-			actionBtn.setText(originalText);
-			for (const b of otherBtns) b.disabled = false;
-		}
-	}
-
-	onClose(): void {
-		this.contentEl.empty();
-		this.onCloseCb();
 	}
 }
 
