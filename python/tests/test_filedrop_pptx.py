@@ -177,7 +177,7 @@ def test_extract_slide_elements_classifies_and_writes_pictures(tmp_path):
     written = tmp_path / "slide1-Picture19.jpg"
     assert written.read_bytes() == b"IMG-BYTES"
     # No author alt text => queued for an LLM description.
-    assert pending == [(picture, pic._image)]
+    assert pending == [(picture, pic._image, [])]
 
     text = elements[1]
     assert text["paragraphs"] == [

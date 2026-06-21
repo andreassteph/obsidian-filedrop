@@ -8,10 +8,29 @@ import { LlmGateway, SlideDoc, getCapabilities, isGatewayEnabled, isGatewayUrlSe
 const { execFile, spawn } = require('child_process') as typeof import('child_process');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const path = require('path') as typeof import('path');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const fs = require('fs') as typeof import('fs');
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const os = require('os') as typeof import('os');
 
 export type ConvertPhase = 'markitdown' | 'llm-image';
 export type OnPhase = (phase: ConvertPhase) => void;
 export type OnProgress = (current: number, total: number) => void;
+
+// Write bundled Python scripts to temp files once per session so they can be
+// invoked as `python <path>` rather than `python -c <34KB string>`, which
+// avoids ENAMETOOLONG on systems that limit individual argument size.
+let _scriptPaths: { convert: string; msg: string } | null = null;
+async function ensurePythonScriptFiles(): Promise<{ convert: string; msg: string }> {
+	if (_scriptPaths) return _scriptPaths;
+	const tmpDir = os.tmpdir();
+	const convertPath = path.join(tmpDir, 'filedrop_convert.py');
+	const msgPath = path.join(tmpDir, 'filedrop_msg.py');
+	await fs.promises.writeFile(convertPath, convertScript, 'utf8');
+	await fs.promises.writeFile(msgPath, msgScript, 'utf8');
+	_scriptPaths = { convert: convertPath, msg: msgPath };
+	return _scriptPaths;
+}
 
 // Run a subprocess, streaming stderr live so we can forward `[filedrop:phase]`
 // markers to the caller, while still buffering the full stdout/stderr for the
@@ -257,11 +276,12 @@ function getPptxCounts(absolutePath: string, pythonCommand: string): Promise<{ s
 
 // Executables carry no extractable text, so ask the LLM what the file most
 // likely is from its name. The reply is an educated guess, flagged as such.
-function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
+async function describeExecutable(absolutePath: string, pythonCommand: string, gateway: LlmGateway | null): Promise<string> {
+	const scripts = await ensurePythonScriptFiles();
 	return new Promise((resolve) => {
 		execFile(
 			pythonCommand,
-			['-c', convertScript, absolutePath],
+			[scripts.convert, absolutePath],
 			{
 				timeout: LLM_TIMEOUT_MS,
 				env: {
@@ -321,6 +341,7 @@ export async function runMarkitdown(
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting without LLM.');
 	} else if (gateway && isGatewayEnabled(gateway)) {
+		const scripts = await ensurePythonScriptFiles();
 		const pageCount = await getPageCount(absolutePath, pythonCommand);
 		const subprocessTimeout = pageCount != null
 			? Math.max(LLM_TIMEOUT_MS, pageCount * LLM_TIMEOUT_PER_PAGE_MS)
@@ -328,7 +349,7 @@ export async function runMarkitdown(
 		return new Promise((resolve) => {
 			runWithPhases(
 				pythonCommand,
-				['-c', convertScript, absolutePath],
+				[scripts.convert, absolutePath],
 				{
 					timeout: subprocessTimeout,
 					maxBuffer: 200 * 1024 * 1024,
@@ -481,10 +502,11 @@ export async function runMsgConversion(
 		env.FILEDROP_LLM_TIMEOUT = String(PYTHON_LLM_TIMEOUT_S);
 	}
 
+	const scripts = await ensurePythonScriptFiles();
 	return new Promise((resolve) => {
 		runWithPhases(
 			pythonCommand,
-			['-c', msgScript, absolutePath],
+			[scripts.msg, absolutePath],
 			// Attachment bytes now travel as temp files, not base64 on stdout, so
 			// stdout only carries markdown + filenames + paths. Keep a generous cap
 			// for very large emails, though it is no longer the binding constraint.
@@ -602,10 +624,11 @@ export async function convertPptx(
 			: LLM_TIMEOUT_MS;
 	}
 
+	const scripts = await ensurePythonScriptFiles();
 	return new Promise((resolve) => {
 		runWithPhases(
 			pythonCommand,
-			['-c', convertScript, '--pptx', absolutePath],
+			[scripts.convert, '--pptx', absolutePath],
 			{ timeout, maxBuffer: 200 * 1024 * 1024, env },
 			onPhase,
 			(error, stdout, stderr) => {

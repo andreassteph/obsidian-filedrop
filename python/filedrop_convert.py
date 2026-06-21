@@ -548,6 +548,15 @@ def _shape_geometry(shape):
     }
 
 
+def _geoms_overlap(a, b):
+    """Return True if two geom dicts (left/top/width/height in EMU) intersect."""
+    if any(v is None for v in (a.get("left"), a.get("top"), a.get("width"), a.get("height"),
+                                b.get("left"), b.get("top"), b.get("width"), b.get("height"))):
+        return False
+    return (a["left"] < b["left"] + b["width"] and a["left"] + a["width"] > b["left"] and
+            a["top"]  < b["top"]  + b["height"] and a["top"]  + a["height"] > b["top"])
+
+
 def _picture_filename(shape):
     """The stripped-name base markitdown uses for a PPTX picture, plus .jpg.
     Not used as the on-disk name directly — see _unique_picture_name, which
@@ -651,10 +660,11 @@ def _slide_notes(slide):
         return ""
 
 
-def _describe_image(image, env, client, prompt):
+def _describe_image(image, env, client, prompt, overlay_texts=None):
     """Return a short LLM description of a python-pptx Image, or "" on failure.
     Large blobs are re-encoded as compressed JPEG (reusing the PDF-page 413
-    guard) so the payload stays under the gateway's request-size limit."""
+    guard) so the payload stays under the gateway's request-size limit.
+    overlay_texts: text labels from PowerPoint shapes positioned over this image."""
     import base64
 
     blob = image.blob
@@ -679,16 +689,24 @@ def _describe_image(image, env, client, prompt):
             print(f"[filedrop] pptx image compression skipped: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     b64 = base64.b64encode(blob).decode("ascii")
+    user_content = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
+    ]
+    if overlay_texts:
+        label_str = ", ".join(f'"{t}"' for t in overlay_texts)
+        user_content.append({
+            "type": "text",
+            "text": (
+                f"Note: the following text labels appear as separate PowerPoint shapes "
+                f"positioned over this image (they are not burned into the image pixels): "
+                f"{label_str}. Incorporate these labels into your description."
+            ),
+        })
     try:
         resp = client.chat.completions.create(
             model=env["FILEDROP_LLM_MODEL"],
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:{content_type};base64,{b64}"}},
-                ],
-            }],
+            messages=[{"role": "user", "content": user_content}],
             **_token_kwargs(env, 1024),
             **_temperature_kwargs(env),
         )
@@ -761,6 +779,34 @@ def _extract_slide_elements(slide, pics_dir, slide_index, seen):
                 elements.append({"type": "text", "geom": geom, "paragraphs": paragraphs})
             continue
 
+        # Structural drawing shapes (arrows, connectors, bare boxes, etc.) that
+        # carry no text frame — capture them so the reflow LLM can describe
+        # the diagram structure they form.
+        shape_type_name = getattr(getattr(shape, "shape_type", None), "name", None)
+        if shape_type_name in ("AUTO_SHAPE", "LINE", "CONNECTOR", "FREEFORM"):
+            kind = getattr(getattr(shape, "auto_shape_type", None), "name", shape_type_name)
+            elements.append({"type": "shape", "geom": geom, "shape_kind": kind.lower(), "text": ""})
+
+    # Post-processing: for each image awaiting LLM description, collect text
+    # elements that spatially overlap it (overlay labels whose text is a
+    # separate PowerPoint shape positioned over the image). Pass them to the
+    # vision LLM as context, but keep them in the element list so they remain
+    # visible in the output.
+    overlay_map = {}
+    for pi, (pic_el, img_obj) in enumerate(pending):
+        texts = []
+        for el in elements:
+            if el["type"] != "text":
+                continue
+            if _geoms_overlap(pic_el["geom"], el["geom"]):
+                for para in el.get("paragraphs", []):
+                    t = para.get("text", "").strip()
+                    if t:
+                        texts.append(t)
+        overlay_map[pi] = texts
+
+    pending = [(el, img, overlay_map[pi]) for pi, (el, img) in enumerate(pending)]
+
     return elements, pending
 
 
@@ -830,8 +876,8 @@ def convert_pptx_structured(path, env):
 
         def _run(item):
             nonlocal completed
-            element, image = item
-            element["description"] = _describe_image(image, env, client, image_prompt)
+            element, image, overlay_texts = item
+            element["description"] = _describe_image(image, env, client, image_prompt, overlay_texts=overlay_texts)
             if show_progress:
                 with lock:
                     completed += 1

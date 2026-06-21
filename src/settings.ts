@@ -919,7 +919,8 @@ export type SlideElement =
 	| { type: 'text'; geom: SlideGeom; paragraphs: { text: string; level: number }[] }
 	| { type: 'table'; geom: SlideGeom; markdown: string }
 	| { type: 'chart'; geom: SlideGeom; title: string; markdown: string }
-	| { type: 'picture'; geom: SlideGeom; filename: string; description: string };
+	| { type: 'picture'; geom: SlideGeom; filename: string; description: string }
+	| { type: 'shape'; geom: SlideGeom; shape_kind: string; text: string };
 
 export interface SlideDoc {
 	index: number;
@@ -953,6 +954,9 @@ function slidesToPrompt(slides: SlideDoc[]): string {
 				parts.push(`TABLE ${pos}\n${el.markdown}`);
 			} else if (el.type === 'chart') {
 				parts.push(`CHART ${pos}${el.title ? ` title="${el.title}"` : ''}\n${el.markdown}`);
+			} else if (el.type === 'shape') {
+				const txt = el.text ? ` text="${el.text}"` : '';
+				parts.push(`SHAPE ${pos} kind=${el.shape_kind}${txt}`);
 			} else {
 				parts.push(`IMAGE ${pos} ref=${el.filename}${el.description ? ` description="${el.description}"` : ''}`);
 			}
@@ -994,6 +998,8 @@ const PPTX_REFLOW_SYSTEM =
 	'For CHART elements, render the provided data as a Markdown table and add a one-sentence summary of the trend it shows. ' +
 	"If a slide has NOTES, render them under a '### Notes' subheading after that slide's content. " +
 	'Emit every image exactly as ![description](ref), using the given ref filename verbatim and unmodified — no folder and no path. ' +
+	'SHAPE elements are structural drawing elements (arrows, connectors, boxes, pentagons, etc.) with their shape kind and any text they contain. ' +
+	'When a slide contains SHAPE elements, describe the overall structure or flow they form (e.g. a flowchart or process diagram) rather than listing each shape individually. Omit SHAPE elements that carry no content and are purely decorative. ' +
 	'Return ONLY the Markdown, with no preamble and no code fences.';
 
 // Reflow one batch of slides via the LLM. Returns the cleaned Markdown.
@@ -1079,6 +1085,8 @@ export function renderSlidesPlain(slides: SlideDoc[]): string {
 				out.push(el.markdown);
 			} else if (el.type === 'chart') {
 				out.push((el.title ? `**${el.title}**\n\n` : '') + el.markdown);
+			} else if (el.type === 'shape') {
+				if (el.text) out.push(el.text);
 			} else {
 				out.push(`![${el.description}](${el.filename})`);
 			}
