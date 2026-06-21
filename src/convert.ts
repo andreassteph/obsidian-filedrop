@@ -198,7 +198,8 @@ function subprocessErrorDetail(
 	if (error.code === 'ENOENT') {
 		return 'Python could not be started — check the Python command in FileDrop settings.';
 	}
-	return 'The conversion process exited unexpectedly without any error output.';
+	const code = error.code != null ? ` (exit code: ${error.code})` : '';
+	return `The conversion process exited unexpectedly without any error output${code}.`;
 }
 
 // Quick pre-flight count for multi-page formats so we can size the subprocess
@@ -574,6 +575,7 @@ export async function convertPptx(
 	gateway: LlmGateway | null,
 	onPhase?: OnPhase,
 	onProgress?: OnProgress,
+	onFallback?: (reason: string) => void,
 ): Promise<PptxStructuredResult | null> {
 	if (gateway && isGatewayEnabled(gateway) && !isGatewayUrlSecure(gateway.baseUrl)) {
 		new Notice('FileDrop: refusing to send the API key over an insecure connection — converting PPTX without LLM.');
@@ -608,7 +610,9 @@ export async function convertPptx(
 			onPhase,
 			(error, stdout, stderr) => {
 				if (error) {
-					console.error('FileDrop convertPptx failed:', subprocessErrorDetail(error, stderr, stdout, timeout));
+					const detail = subprocessErrorDetail(error, stderr, stdout, timeout);
+					console.error('FileDrop convertPptx failed:', detail);
+					onFallback?.(detail);
 					resolve(null);
 					return;
 				}
@@ -627,7 +631,9 @@ export async function convertPptx(
 						pictures: (parsed.pictures ?? []).map((p) => ({ filename: p.filename, tempPath: p.path })),
 					});
 				} catch (e) {
-					console.error('FileDrop convertPptx: could not parse output as JSON:', e);
+					const detail = `Could not parse PPTX extractor output as JSON: ${e instanceof Error ? e.message : String(e)}`;
+					console.error('FileDrop convertPptx:', detail);
+					onFallback?.(detail);
 					resolve(null);
 				}
 			},

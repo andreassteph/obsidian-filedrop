@@ -729,14 +729,23 @@ def _extract_slide_elements(slide, pics_dir, slide_index, seen):
             continue
 
         if getattr(shape, "has_table", False):
-            md = _table_markdown(shape.table)
+            try:
+                md = _table_markdown(shape.table)
+            except Exception as exc:
+                print(f"[filedrop] pptx table access failed on slide {slide_index}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                continue
             if md:
                 elements.append({"type": "table", "geom": geom, "markdown": md})
             continue
 
         if getattr(shape, "has_chart", False):
-            title = _chart_title(shape.chart)
-            md = _chart_markdown(shape.chart)
+            try:
+                chart = shape.chart
+                title = _chart_title(chart)
+                md = _chart_markdown(chart)
+            except Exception as exc:
+                print(f"[filedrop] pptx chart access failed on slide {slide_index}: {type(exc).__name__}: {exc}", file=sys.stderr)
+                continue
             if title or md:
                 elements.append({"type": "chart", "geom": geom, "title": title, "markdown": md})
             continue
@@ -794,7 +803,11 @@ def convert_pptx_structured(path, env):
     pending = []
     seen_names = set()
     for idx, slide in enumerate(prs.slides, 1):
-        elements, slide_pending = _extract_slide_elements(slide, pics_dir, idx, seen_names)
+        try:
+            elements, slide_pending = _extract_slide_elements(slide, pics_dir, idx, seen_names)
+        except Exception as exc:
+            print(f"[filedrop] pptx slide {idx} extraction failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+            elements, slide_pending = [], []
         for element in elements:
             if element.get("type") == "picture":
                 pictures.append({"filename": element["filename"], "path": os.path.join(pics_dir, element["filename"])})

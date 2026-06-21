@@ -217,9 +217,14 @@ export default class FileDropPlugin extends Plugin {
 		picturesDirName: string,
 		filenamePrefix = '',
 	): Promise<string> {
-		const result = await convertPptx(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+		let pptxFallbackReason: string | undefined;
+		const result = await convertPptx(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress, (r) => { pptxFallbackReason = r; });
 		if (!result) {
-			return runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
+			const fallback = await runMarkitdown(absolutePath, this.settings.pythonCommand, gateway, onPhase, this.settings.describeExtensions, onProgress);
+			if (!pptxFallbackReason) return fallback;
+			const reason = pptxFallbackReason;
+			const warning = `> [!warning] Structured PPTX extraction failed — fell back to plain markitdown\n> ${reason.replace(/\n/g, '\n> ')}`;
+			return `${warning}\n\n${fallback}`;
 		}
 
 		// Apply the per-source prefix to the picture references so the slide data,
