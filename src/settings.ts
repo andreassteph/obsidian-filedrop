@@ -71,6 +71,7 @@ export interface FileDropSettings {
 	referenceMaxMatches: number;
 	todoSection: string;
 	todoPrompt: string;
+	pptxBatchMaxSlides: number;
 	// Legacy fields — read on first load for migration only
 	llmProvider?: string;
 	llmGatewayUrl?: string;
@@ -99,6 +100,7 @@ export type FileDropStatus =
 	| 'converting'
 	| 'converting-markitdown'
 	| 'converting-llm-image'
+	| 'converting-llm-reflow'
 	| 'converting-llm-tags'
 	| 'converted'
 	| 'verified'
@@ -111,6 +113,7 @@ export const STATUS_LABELS: Record<FileDropStatus, string> = {
 	converting: 'converting',
 	'converting-markitdown': 'converting (markitdown)',
 	'converting-llm-image': 'converting (llm picture description)',
+	'converting-llm-reflow': 'converting (llm slide reflow)',
 	'converting-llm-tags': 'converting (llm description)',
 	converted: 'converted',
 	verified: 'verified',
@@ -123,6 +126,7 @@ export function isConvertingStatus(status: FileDropStatus): boolean {
 		status === 'converting' ||
 		status === 'converting-markitdown' ||
 		status === 'converting-llm-image' ||
+		status === 'converting-llm-reflow' ||
 		status === 'converting-llm-tags'
 	);
 }
@@ -180,6 +184,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceMaxMatches: 5,
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
+	pptxBatchMaxSlides: 8,
 };
 
 export interface PreferredTag {
@@ -966,18 +971,18 @@ function slidesToPrompt(slides: SlideDoc[]): string {
 	return parts.join('\n\n');
 }
 
-const PPTX_BATCH_MAX_SLIDES = 8;
+const PPTX_BATCH_MAX_SLIDES_DEFAULT = 8;
 const PPTX_BATCH_MAX_CHARS = 12000;
 
 // Split a deck into batches small enough that each reflow response stays well
 // under the token cap (avoids silently truncating later slides on big decks).
-function batchSlides(slides: SlideDoc[]): SlideDoc[][] {
+function batchSlides(slides: SlideDoc[], maxSlides: number): SlideDoc[][] {
 	const batches: SlideDoc[][] = [];
 	let current: SlideDoc[] = [];
 	let chars = 0;
 	for (const slide of slides) {
 		const size = slidesToPrompt([slide]).length;
-		if (current.length > 0 && (current.length >= PPTX_BATCH_MAX_SLIDES || chars + size > PPTX_BATCH_MAX_CHARS)) {
+		if (current.length > 0 && (current.length >= maxSlides || chars + size > PPTX_BATCH_MAX_CHARS)) {
 			batches.push(current);
 			current = [];
 			chars = 0;
@@ -1040,7 +1045,8 @@ async function reflowBatch(
 export async function structurePptxSlides(
 	slides: SlideDoc[],
 	gateway: LlmGateway | null,
-	persist?: () => Promise<void>
+	persist?: () => Promise<void>,
+	maxSlidesPerBatch?: number
 ): Promise<LlmResult<string>> {
 	if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -1048,7 +1054,7 @@ export async function structurePptxSlides(
 
 	const rendered: string[] = [];
 	let anyOk = false;
-	for (const batch of batchSlides(slides)) {
+	for (const batch of batchSlides(slides, maxSlidesPerBatch ?? PPTX_BATCH_MAX_SLIDES_DEFAULT)) {
 		const res = await reflowBatch(gateway, batch, persist);
 		if (res.ok) {
 			rendered.push(res.value);

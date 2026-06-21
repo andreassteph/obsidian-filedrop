@@ -146,6 +146,22 @@ export class FileDropSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('PPTX reflow batch size')
+			.setDesc('Number of slides sent to the LLM per reflow call (default 8). Increase for fast models with large context windows; decrease for slow or small-context models.')
+			.addText((text) =>
+				text
+					.setPlaceholder(String(DEFAULT_SETTINGS.pptxBatchMaxSlides))
+					.setValue(String(this.plugin.settings.pptxBatchMaxSlides))
+					.onChange(async (value) => {
+						const n = parseInt(value, 10);
+						if (!isNaN(n) && n >= 1) {
+							this.plugin.settings.pptxBatchMaxSlides = n;
+							await this.plugin.saveSettings();
+						}
+					})
+			);
+
+		new Setting(containerEl)
 			.setName('Preferred tags')
 			.setDesc('One per line as "tag: description". After conversion the LLM is asked to prefer these tags.')
 			.addTextArea((text) =>

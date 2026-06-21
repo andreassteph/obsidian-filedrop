@@ -13,7 +13,7 @@ const fs = require('fs') as typeof import('fs');
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const os = require('os') as typeof import('os');
 
-export type ConvertPhase = 'markitdown' | 'llm-image';
+export type ConvertPhase = 'markitdown' | 'llm-image' | 'llm-reflow';
 export type OnPhase = (phase: ConvertPhase) => void;
 export type OnProgress = (current: number, total: number) => void;
 

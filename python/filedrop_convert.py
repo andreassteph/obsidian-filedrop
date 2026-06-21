@@ -870,18 +870,17 @@ def convert_pptx_structured(path, env):
 
         _emit_phase("llm-image")
         total = len(pending)
-        show_progress = total > PAGE_PROGRESS_THRESHOLD
         lock = threading.Lock()
         completed = 0
+        _emit_progress(0, total)
 
         def _run(item):
             nonlocal completed
             element, image, overlay_texts = item
             element["description"] = _describe_image(image, env, client, image_prompt, overlay_texts=overlay_texts)
-            if show_progress:
-                with lock:
-                    completed += 1
-                    _emit_progress(completed, total)
+            with lock:
+                completed += 1
+                _emit_progress(completed, total)
 
         with ThreadPoolExecutor(max_workers=min(4, total)) as pool:
             list(pool.map(_run, pending))

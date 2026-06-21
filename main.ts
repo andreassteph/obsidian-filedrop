@@ -18,7 +18,7 @@ import {
 	suggestFilename,
 	suggestTags,
 } from './src/settings';
-import { MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
+import { ConvertPhase, MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
 import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
@@ -248,7 +248,8 @@ export default class FileDropPlugin extends Plugin {
 			await this.cleanupMsgTempFiles(result.pictures);
 		}
 
-		const structured = await structurePptxSlides(result.slides, gateway, () => this.saveSettings());
+		onPhase?.('llm-reflow');
+		const structured = await structurePptxSlides(result.slides, gateway, () => this.saveSettings(), this.settings.pptxBatchMaxSlides);
 		const body = structured.ok ? structured.value : renderSlidesPlain(result.slides);
 		const linked = rewriteImageLinks(body, picturesDirName, writtenNames);
 
@@ -303,7 +304,7 @@ export default class FileDropPlugin extends Plugin {
 		category: string,
 		members: { rawName: string; rawFilePath: string }[],
 		gateway: LlmGateway | null,
-		onPhase: (phase: 'markitdown' | 'llm-image') => void,
+		onPhase: (phase: ConvertPhase) => void,
 		picturesDirVaultPath: string,
 		picturesDirName: string,
 		isExternal = false,
@@ -460,8 +461,8 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 
-			const onPhase = (phase: 'markitdown' | 'llm-image') => {
-				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+			const onPhase = (phase: ConvertPhase) => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : phase === 'llm-reflow' ? 'converting-llm-reflow' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
 			const onProgress: OnProgress = (current, total) => {
@@ -672,8 +673,8 @@ export default class FileDropPlugin extends Plugin {
 			entry.status = 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 
-			const onPhase = (phase: 'markitdown' | 'llm-image') => {
-				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+			const onPhase = (phase: ConvertPhase) => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : phase === 'llm-reflow' ? 'converting-llm-reflow' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
 			const onProgress: OnProgress = (current, total) => {
@@ -758,7 +759,13 @@ export default class FileDropPlugin extends Plugin {
 			const tagResult = await suggestTags(markdownBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
-			if (this.cancelledConversions.delete(notePath)) return;
+			if (this.cancelledConversions.delete(notePath)) {
+				entry.status = 'error';
+				await this.saveSettings();
+				this.getActiveView()?.renderFileList();
+				new Notice(`FileDrop: conversion cancelled — "${entry.filename ?? notePath}"`);
+				return;
+			}
 
 			const frontmatterLines = [
 				'---',
@@ -827,8 +834,8 @@ export default class FileDropPlugin extends Plugin {
 				? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
 				: null;
 
-			const onPhase = (phase: 'markitdown' | 'llm-image') => {
-				entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+			const onPhase = (phase: ConvertPhase) => {
+				entry.status = phase === 'llm-image' ? 'converting-llm-image' : phase === 'llm-reflow' ? 'converting-llm-reflow' : 'converting-markitdown';
 				this.getActiveView()?.renderFileList();
 			};
 			const onProgress: OnProgress = (current, total) => {
@@ -920,10 +927,22 @@ export default class FileDropPlugin extends Plugin {
 			this.getActiveView()?.renderFileList();
 
 			const noteFile = vault.getAbstractFileByPath(entry.notePath);
-			if (!(noteFile instanceof TFile)) return;
+			if (!(noteFile instanceof TFile)) {
+				entry.status = 'error';
+				await this.saveSettings();
+				this.getActiveView()?.renderFileList();
+				new Notice(`FileDrop: re-conversion failed — note file not found: ${entry.notePath}`);
+				return;
+			}
 			const content = await vault.read(noteFile);
 			const closingIdx = content.indexOf('\n---\n');
-			if (closingIdx < 0) return;
+			if (closingIdx < 0) {
+				entry.status = 'error';
+				await this.saveSettings();
+				this.getActiveView()?.renderFileList();
+				new Notice(`FileDrop: re-conversion failed — could not find frontmatter in ${entry.notePath}`);
+				return;
+			}
 
 			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
@@ -1111,8 +1130,8 @@ export default class FileDropPlugin extends Plugin {
 		entry.status = 'converting-markitdown';
 		this.getActiveView()?.renderFileList();
 
-		const onPhase = (phase: 'markitdown' | 'llm-image') => {
-			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+		const onPhase = (phase: ConvertPhase) => {
+			entry.status = phase === 'llm-image' ? 'converting-llm-image' : phase === 'llm-reflow' ? 'converting-llm-reflow' : 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 		};
 		const onProgress: OnProgress = (current, total) => {
@@ -1216,8 +1235,8 @@ export default class FileDropPlugin extends Plugin {
 		entry.status = 'converting-markitdown';
 		this.getActiveView()?.renderFileList();
 
-		const onPhase = (phase: 'markitdown' | 'llm-image') => {
-			entry.status = phase === 'llm-image' ? 'converting-llm-image' : 'converting-markitdown';
+		const onPhase = (phase: ConvertPhase) => {
+			entry.status = phase === 'llm-image' ? 'converting-llm-image' : phase === 'llm-reflow' ? 'converting-llm-reflow' : 'converting-markitdown';
 			this.getActiveView()?.renderFileList();
 		};
 		const onProgress: OnProgress = (current, total) => {
@@ -1482,6 +1501,7 @@ export default class FileDropPlugin extends Plugin {
 			!f.path.endsWith('.md') &&
 			!f.path.includes('.attachments/') &&
 			!f.path.includes('.group/') &&
+			!f.path.includes('_pictures/') &&
 			!claimedPaths.has(f.path)
 		);
 		for (const file of rawFiles) {

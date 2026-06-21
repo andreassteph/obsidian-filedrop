@@ -397,8 +397,9 @@ export class FileDropView extends ItemView {
 
 		const status = entry.status ?? 'unknown';
 		const baseLabel = STATUS_LABELS[status] ?? status;
+		const progressUnit = status === 'converting-llm-image' ? 'image' : 'page';
 		const progressSuffix = entry.pageProgress && isConvertingStatus(status)
-			? ` (page ${entry.pageProgress.current}/${entry.pageProgress.total})`
+			? ` (${progressUnit} ${entry.pageProgress.current}/${entry.pageProgress.total})`
 			: '';
 		headerRow.createEl('span', {
 			cls: `filedrop-status filedrop-status--${status}`,
