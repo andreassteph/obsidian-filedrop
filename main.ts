@@ -31,6 +31,13 @@ const fs = require('fs') as typeof import('fs');
 const sha256 = (buf: ArrayBuffer): string =>
 	createHash('sha256').update(Buffer.from(buf)).digest('hex');
 
+// Settings holding absolute filesystem paths are stored per-device via
+// Obsidian's localStorage (namespaced by vault id, never synced) so the same
+// vault can point at different paths on each machine. Keys are namespaced to
+// avoid clashing with other plugins sharing the vault's localStorage.
+const LS_EXTERNAL_FOLDER = 'obsidian-filedrop:externalFolder';
+const LS_PYTHON_COMMAND = 'obsidian-filedrop:pythonCommand';
+
 // Build a clickable file:// URL for a raw file that lives outside the vault.
 // Backslashes are normalized to forward slashes so Windows paths work, and the
 // path is prefixed with a leading slash to yield the file:///<path> form.
@@ -511,11 +518,39 @@ export default class FileDropPlugin extends Plugin {
 		delete (this.settings as any).llmApiKey;
 		delete (this.settings as any).llmModel;
 		delete (this.settings as any).llmPrompt;
+		// Per-device path fields live in localStorage, not synced data.json.
+		this.loadDevicePath(LS_EXTERNAL_FOLDER, 'externalFolder', rawSettings);
+		this.loadDevicePath(LS_PYTHON_COMMAND, 'pythonCommand', rawSettings);
 		this.recentFiles = data?.recentFiles ?? [];
 	}
 
+	// Resolve a per-device path field: prefer the value stored in this device's
+	// localStorage; otherwise migrate any legacy value that was synced in
+	// data.json (adopting it on this device once); otherwise fall back to the
+	// default.
+	private loadDevicePath(
+		lsKey: string,
+		field: 'externalFolder' | 'pythonCommand',
+		rawSettings: Partial<FileDropSettings>,
+	): void {
+		const stored = this.app.loadLocalStorage(lsKey) as string | null;
+		if (stored != null) {
+			this.settings[field] = stored;
+		} else if (rawSettings[field]) {
+			this.settings[field] = rawSettings[field] as string;
+			this.app.saveLocalStorage(lsKey, rawSettings[field] as string);
+		} else {
+			this.settings[field] = DEFAULT_SETTINGS[field];
+		}
+	}
+
 	async saveSettings(): Promise<void> {
-		await this.saveData({ settings: this.settings, recentFiles: this.recentFiles });
+		// Route per-device path fields to localStorage and keep them out of the
+		// synced data.json (empty value clears the key).
+		this.app.saveLocalStorage(LS_EXTERNAL_FOLDER, this.settings.externalFolder || undefined);
+		this.app.saveLocalStorage(LS_PYTHON_COMMAND, this.settings.pythonCommand || undefined);
+		const { externalFolder, pythonCommand, ...syncedSettings } = this.settings;
+		await this.saveData({ settings: syncedSettings, recentFiles: this.recentFiles });
 	}
 
 	getActiveView(): FileDropView | null {

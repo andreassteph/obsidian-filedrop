@@ -45,7 +45,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('External folder')
-			.setDesc('Absolute path to a folder outside the vault. On scan, its top-level files become linked notes under the incoming directory and its top-level subfolders become group notes. Leave empty to disable.')
+			.setDesc('Absolute path to a folder outside the vault. On scan, its top-level files become linked notes under the incoming directory and its top-level subfolders become group notes. Leave empty to disable. Stored per-device and not synced, so each device can point at its own copy of the folder.')
 			.addText((text) =>
 				text
 					.setPlaceholder('e.g. F:/OneDrive')
@@ -185,7 +185,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Python command')
-			.setDesc('Interpreter where markitdown and openai are installed.')
+			.setDesc('Interpreter where markitdown and openai are installed. Stored per-device (not synced).')
 			.addText((text) =>
 				text
 					.setPlaceholder('python3')

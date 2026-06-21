@@ -56,7 +56,7 @@ export interface ReferenceConditionGroup {
 
 export interface FileDropSettings {
 	incomingDir: string;
-	externalFolder: string;          // absolute OS path, '' = disabled
+	externalFolder: string;          // absolute OS path, '' = disabled; persisted per-device (localStorage), not synced
 	externalGroupFileLimit: number;  // max files per top-level folder group
 	categories: string[];
 	defaultTags: string[];
@@ -65,7 +65,7 @@ export interface FileDropSettings {
 	groupConcurrency: number;
 	largeFileWarnMb: number;
 	llmGateways: LlmGateway[];
-	pythonCommand: string;
+	pythonCommand: string;           // interpreter path; persisted per-device (localStorage), not synced
 	referenceGroups: ReferenceConditionGroup[];
 	referenceTemplate: string;
 	referenceMaxMatches: number;
