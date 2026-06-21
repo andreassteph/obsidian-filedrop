@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.5.7 — Improve PPTX fallback visibility and error resilience
+
+### Changes
+
+- Surface a warning callout in the note when structured PPTX extraction fails and markitdown is used as a fallback, including the reason for the failure
+- Catch per-slide, table, and chart extraction errors in Python so a single bad shape no longer aborts conversion of the whole deck
+- Include the exit code in the generic subprocess error message for easier debugging
+
 ## 0.5.6 — Improved PPTX conversion and extraction
 
 ### Changes
