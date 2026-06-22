@@ -54,6 +54,15 @@ export interface ReferenceConditionGroup {
 	template: string;           // empty = use global referenceTemplate
 }
 
+// A restructure template pairs a template note (headings + per-section guidance)
+// with the main vault folder where restructured notes derived from it are filed.
+export interface RestructureTemplatePair {
+	id: string;
+	name: string;            // user-facing label
+	templatePath: string;    // vault-relative path to the template .md
+	targetFolder: string;    // vault-relative main folder for created notes
+}
+
 export interface FileDropSettings {
 	incomingDir: string;
 	externalFolder: string;          // absolute OS path, '' = disabled
@@ -70,6 +79,7 @@ export interface FileDropSettings {
 	referenceTemplate: string;
 	referenceMaxMatches: number;
 	templateFolder: string;          // vault-relative folder of note templates, '' = disabled
+	restructureTemplates: RestructureTemplatePair[];  // template ↔ main-folder pairs for the restructure workflow
 	todoSection: string;
 	todoPrompt: string;
 	pptxBatchMaxSlides: number;
@@ -184,6 +194,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
 	referenceMaxMatches: 5,
 	templateFolder: '',
+	restructureTemplates: [],
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
 	pptxBatchMaxSlides: 8,
