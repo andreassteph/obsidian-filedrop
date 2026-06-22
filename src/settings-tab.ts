@@ -6,6 +6,7 @@ import {
 	LLM_PROVIDERS,
 	ModelCapabilities,
 	ReferenceConditionGroup,
+	RestructureTemplatePair,
 	fetchModelsForGateway,
 	gatewayUrlIssue,
 	getCapabilities,
@@ -308,6 +309,33 @@ export class FileDropSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Restructure templates
+		new Setting(containerEl).setName('Restructure templates').setHeading();
+		new Setting(containerEl).setDesc(
+			'Template ↔ main-folder pairs for the "Create a restructured note" action in the current-note panel. ' +
+			'Each pair binds a template note (headings with per-section guidance lines) to the folder where restructured notes are filed. ' +
+			'The LLM suggests which pair fits the current note and which subfolder to use.',
+		);
+
+		this.plugin.settings.restructureTemplates.forEach((pair, idx) => {
+			this.renderRestructurePair(containerEl, pair, idx);
+		});
+
+		new Setting(containerEl)
+			.setName('Add restructure pair')
+			.addButton((btn) =>
+				btn.setButtonText('+ Add pair').onClick(async () => {
+					this.plugin.settings.restructureTemplates.push({
+						id: crypto.randomUUID(),
+						name: 'New pair',
+						templatePath: '',
+						targetFolder: '',
+					});
+					await this.plugin.saveSettings();
+					this.display();
+				}),
+			);
+
 		// References
 		new Setting(containerEl).setName('References').setHeading();
 
@@ -591,6 +619,58 @@ export class FileDropSettingTab extends PluginSettingTab {
 		];
 		const when = caps.checkedAt ? ` (checked ${new Date(caps.checkedAt).toLocaleString()})` : '';
 		return `Detected: ${parts.join(' · ')}${when}`;
+	}
+
+	private renderRestructurePair(containerEl: HTMLElement, pair: RestructureTemplatePair, idx: number): void {
+		const wrapperEl = containerEl.createDiv({ cls: 'filedrop-gateway-entry' });
+
+		new Setting(wrapperEl)
+			.setName(`Pair ${idx + 1}`)
+			.addText((text) =>
+				text
+					.setPlaceholder('Pair name, e.g. Meeting → Meetings')
+					.setValue(pair.name)
+					.onChange(async (value) => {
+						this.plugin.settings.restructureTemplates[idx].name = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			)
+			.addButton((btn) =>
+				btn
+					.setIcon('trash')
+					.setTooltip('Remove pair')
+					.onClick(async () => {
+						this.plugin.settings.restructureTemplates.splice(idx, 1);
+						await this.plugin.saveSettings();
+						this.display();
+					}),
+			);
+
+		new Setting(wrapperEl)
+			.setName('Template path')
+			.setDesc('Vault-relative path to the template note (headings + guidance lines).')
+			.addText((text) =>
+				text
+					.setPlaceholder('e.g. Templates/Meeting.md')
+					.setValue(pair.templatePath)
+					.onChange(async (value) => {
+						this.plugin.settings.restructureTemplates[idx].templatePath = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
+
+		new Setting(wrapperEl)
+			.setName('Target folder')
+			.setDesc('Vault-relative main folder where restructured notes are filed (a subfolder is suggested per note).')
+			.addText((text) =>
+				text
+					.setPlaceholder('e.g. Meetings')
+					.setValue(pair.targetFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.restructureTemplates[idx].targetFolder = value.trim();
+						await this.plugin.saveSettings();
+					}),
+			);
 	}
 
 	private renderReferenceGroup(containerEl: HTMLElement, group: ReferenceConditionGroup, idx: number): void {

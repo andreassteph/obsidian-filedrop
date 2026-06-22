@@ -4,8 +4,10 @@ import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConver
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
 import { findTemplates, rankTemplates } from './templates';
+import { loadRestructurePairs, rankRestructurePairs } from './restructure';
 import { ReferenceModal } from './reference-modal';
 import { TemplateModal } from './template-modal';
+import { RestructureModal } from './restructure-modal';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -60,6 +62,9 @@ export class FileDropView extends ItemView {
 		}
 		if (this.plugin.settings.templateFolder.trim()) {
 			this.createIconActionButton(this.currentNoteActionRow, 'layout-template', 'Fix frontmatter to the matching template', () => this.fixCurrentNoteToTemplate());
+		}
+		if (this.plugin.settings.restructureTemplates.length > 0) {
+			this.createIconActionButton(this.currentNoteActionRow, 'copy-plus', 'Create a restructured note from a template', () => this.restructureCurrentNote());
 		}
 
 		this.updateCurrentNotePanel(this.app.workspace.getActiveFile());
@@ -685,6 +690,43 @@ export class FileDropView extends ItemView {
 		);
 
 		new TemplateModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
+	}
+
+	private async restructureCurrentNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const pairs = (await loadRestructurePairs(this.app, this.plugin.settings.restructureTemplates))
+			.filter((p) => p.template.file.path !== file.path); // never restructure a note from itself
+		if (pairs.length === 0) {
+			new Notice('FileDrop: no usable restructure templates are configured.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const fmEnd = content.indexOf('\n---\n');
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+		const rawFm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		const noteFrontmatter: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(rawFm)) {
+			if (k === 'position') continue;
+			noteFrontmatter[k] = v;
+		}
+
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		const { ranked, usedLlm } = await rankRestructurePairs(
+			file.basename,
+			noteFrontmatter,
+			body,
+			pairs,
+			gateway,
+			() => this.plugin.saveSettings(),
+		);
+
+		new RestructureModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
 	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {
