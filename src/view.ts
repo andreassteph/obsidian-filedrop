@@ -3,7 +3,9 @@ import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obs
 import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
+import { findTemplates, rankTemplates } from './templates';
 import { ReferenceModal } from './reference-modal';
+import { TemplateModal } from './template-modal';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -55,6 +57,9 @@ export class FileDropView extends ItemView {
 		this.createIconActionButton(this.currentNoteActionRow, 'tags', 'Suggest tags with the selected LLM', () => this.suggestTagsForCurrentNote());
 		if (this.plugin.settings.referenceGroups.length > 0) {
 			this.createIconActionButton(this.currentNoteActionRow, 'link', 'Find and add references to matching notes', () => this.addReferencesForCurrentNote());
+		}
+		if (this.plugin.settings.templateFolder.trim()) {
+			this.createIconActionButton(this.currentNoteActionRow, 'layout-template', 'Fix frontmatter to the matching template', () => this.fixCurrentNoteToTemplate());
 		}
 
 		this.updateCurrentNotePanel(this.app.workspace.getActiveFile());
@@ -642,6 +647,44 @@ export class FileDropView extends ItemView {
 			return;
 		}
 		await this.addReferencesForNote(file);
+	}
+
+	private async fixCurrentNoteToTemplate(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const folder = this.plugin.settings.templateFolder.trim();
+		const templates = (await findTemplates(this.app, folder))
+			.filter((t) => t.file.path !== file.path); // never match a note to itself
+		if (templates.length === 0) {
+			new Notice('FileDrop: no templates found in the configured template folder.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const fmEnd = content.indexOf('\n---\n');
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+		const rawFm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		const noteFrontmatter: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(rawFm)) {
+			if (k === 'position') continue;
+			noteFrontmatter[k] = v;
+		}
+
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		const { ranked, usedLlm } = await rankTemplates(
+			file.basename,
+			noteFrontmatter,
+			body,
+			templates,
+			gateway,
+			() => this.plugin.saveSettings(),
+		);
+
+		new TemplateModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
 	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {

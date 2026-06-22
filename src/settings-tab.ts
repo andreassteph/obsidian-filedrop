@@ -292,6 +292,22 @@ export class FileDropSettingTab extends PluginSettingTab {
 				});
 			});
 
+		// Templates
+		new Setting(containerEl).setName('Templates').setHeading();
+
+		new Setting(containerEl)
+			.setName('Template folder')
+			.setDesc('Vault-relative folder of note templates. The "Fix to template" action in the current-note panel matches a note to one of these templates and merges its frontmatter in. Leave empty to disable.')
+			.addText((text) =>
+				text
+					.setPlaceholder('e.g. Templates')
+					.setValue(this.plugin.settings.templateFolder)
+					.onChange(async (value) => {
+						this.plugin.settings.templateFolder = value.trim();
+						await this.plugin.saveSettings();
+					})
+			);
+
 		// References
 		new Setting(containerEl).setName('References').setHeading();
 
