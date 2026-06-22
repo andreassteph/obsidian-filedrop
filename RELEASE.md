@@ -1,5 +1,15 @@
 # Release Notes
 
+## 0.6.0 — Simplify sidebar UI and harden PPTX/LLM conversion
+
+### Changes
+
+- Streamline the sidebar into an inline current-note panel with icon-based actions, removing a large amount of legacy view code
+- Track the llm-reflow phase during PPTX conversion and make the batch size configurable
+- Harden error handling across PPTX conversion and image LLM calls
+- Pass overlay text to the image LLM and extract structural shapes for richer PPTX descriptions
+- Fix an ENAMETOOLONG error during PPTX image extraction
+
 ## 0.5.7 — Improve PPTX fallback visibility and error resilience
 
 ### Changes
