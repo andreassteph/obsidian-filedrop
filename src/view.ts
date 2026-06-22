@@ -1,6 +1,6 @@
 import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
-import { DroppedFile, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, suggestTags, summarizeContent } from './settings';
+import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
 import { ReferenceModal } from './reference-modal';
@@ -542,14 +542,7 @@ export class FileDropView extends ItemView {
 	}
 
 	private llmErrorMessage(reason: LlmOpError, detail?: string): string {
-		const base: Record<LlmOpError, string> = {
-			'insecure-url': 'refusing to use an insecure gateway URL — use HTTPS or localhost',
-			'empty-content': detail ?? 'note body is empty or contains a conversion error',
-			'timeout': 'the LLM gateway timed out',
-			'api-error': detail ? `gateway error — ${detail}` : 'the gateway returned an error (see console for details)',
-			'no-reply': 'the LLM returned an empty response',
-		};
-		return base[reason];
+		return llmErrorMessage(reason, detail);
 	}
 
 	private async summarizeCurrentNote(): Promise<void> {
@@ -568,6 +561,24 @@ export class FileDropView extends ItemView {
 		const content = await this.app.vault.read(file);
 		const i = content.indexOf('\n---\n');
 		const body = i >= 0 ? content.slice(i + 5) : content;
+
+		// If the note already has a summary, revise it interactively rather than
+		// silently overwriting it with a fresh one.
+		const existingSummary: string = this.app.metadataCache.getFileCache(file)?.frontmatter?.summary ?? '';
+		if (typeof existingSummary === 'string' && existingSummary.trim().length > 0) {
+			new ReviseSummaryModal(
+				this.app,
+				existingSummary,
+				body,
+				gateway,
+				() => this.plugin.saveSettings(),
+				async (revised) => {
+					await this.writeNoteSummary(file.path, revised);
+					new Notice('FileDrop: summary updated.');
+				},
+			).open();
+			return;
+		}
 
 		// Summary and metadata-fill both read only `body` and are independent, so
 		// kick them off together. Extract metadata first to know whether a fill is needed.
@@ -770,6 +781,104 @@ class GroupFinishModal extends Modal {
 
 	onClose(): void {
 		if (!this.resolved) this.onKeepAdding();
+		this.contentEl.empty();
+	}
+}
+
+function llmErrorMessage(reason: LlmOpError, detail?: string): string {
+	const base: Record<LlmOpError, string> = {
+		'insecure-url': 'refusing to use an insecure gateway URL — use HTTPS or localhost',
+		'empty-content': detail ?? 'note body is empty or contains a conversion error',
+		'timeout': 'the LLM gateway timed out',
+		'api-error': detail ? `gateway error — ${detail}` : 'the gateway returned an error (see console for details)',
+		'no-reply': 'the LLM returned an empty response',
+	};
+	return base[reason];
+}
+
+// Opens when the active note already has a summary: the user describes what to
+// change, the LLM revises the existing summary against the document, and the
+// result is saved back via the supplied onSave callback.
+class ReviseSummaryModal extends Modal {
+	private revised: string | null = null;
+
+	constructor(
+		app: App,
+		private readonly currentSummary: string,
+		private readonly body: string,
+		private readonly gateway: LlmGateway,
+		private readonly persist: () => Promise<void>,
+		private readonly onSave: (revised: string) => Promise<void>,
+	) {
+		super(app);
+	}
+
+	onOpen(): void {
+		this.contentEl.createEl('h3', { text: 'Revise summary' });
+
+		this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Current summary' });
+		const current = this.contentEl.createEl('div', { cls: 'filedrop-change-summary-current' });
+		current.setText(this.currentSummary);
+
+		this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'What should change?' });
+		const instructionInput = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
+		instructionInput.placeholder = 'e.g. make it shorter, focus on the decision';
+		instructionInput.rows = 3;
+
+		const previewLabel = this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Revised summary' });
+		const previewInput = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
+		previewInput.rows = 4;
+		previewLabel.hide();
+		previewInput.hide();
+
+		const buttons = this.contentEl.createDiv({ cls: 'filedrop-confirm-buttons' });
+		const cancelBtn = buttons.createEl('button', { text: 'Cancel' });
+		cancelBtn.addEventListener('click', () => this.close());
+
+		const reviseBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Revise' });
+		const saveBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Save' });
+		saveBtn.hide();
+
+		reviseBtn.addEventListener('click', async () => {
+			const instruction = instructionInput.value.trim();
+			if (!instruction) {
+				new Notice('FileDrop: describe what to change first.');
+				return;
+			}
+			reviseBtn.disabled = true;
+			reviseBtn.textContent = 'Revising…';
+			try {
+				// Revise against the latest version (including any manual edits in
+				// the preview) so repeated tweaks compound.
+				const base = this.revised !== null ? previewInput.value : this.currentSummary;
+				const result = await reviseSummary(this.body, base, instruction, this.gateway, undefined, this.persist);
+				if (!result.ok) {
+					new Notice(`FileDrop: could not revise the summary — ${llmErrorMessage(result.reason, result.detail)}.`);
+					return;
+				}
+				this.revised = result.value;
+				previewInput.value = result.value;
+				previewLabel.show();
+				previewInput.show();
+				saveBtn.show();
+			} finally {
+				reviseBtn.disabled = false;
+				reviseBtn.textContent = 'Revise';
+			}
+		});
+
+		saveBtn.addEventListener('click', async () => {
+			const finalSummary = previewInput.value.trim();
+			if (!finalSummary) {
+				new Notice('FileDrop: revised summary is empty.');
+				return;
+			}
+			this.close();
+			await this.onSave(finalSummary);
+		});
+	}
+
+	onClose(): void {
 		this.contentEl.empty();
 	}
 }
