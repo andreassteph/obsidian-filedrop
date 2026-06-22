@@ -69,6 +69,7 @@ export interface FileDropSettings {
 	referenceGroups: ReferenceConditionGroup[];
 	referenceTemplate: string;
 	referenceMaxMatches: number;
+	templateFolder: string;          // vault-relative folder of note templates, '' = disabled
 	todoSection: string;
 	todoPrompt: string;
 	pptxBatchMaxSlides: number;
@@ -182,6 +183,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceGroups: [],
 	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
 	referenceMaxMatches: 5,
+	templateFolder: '',
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
 	pptxBatchMaxSlides: 8,
