@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.6.1 — Add note-template workflows for frontmatter fixing and restructuring
+
+### Changes
+
+- Add a "Create a restructured note" action that reflows a note into a chosen template's headings, fact-checks the result against the source, and creates a new note
+- Add a "Fix to template" action that matches a note to a configured template and merges in its frontmatter
+- Unify template configuration: "Fix to template" now reuses the same template ↔ folder pairs as the restructure workflow instead of a separate template folder setting
+- Add path autocomplete (file/folder suggestions) to the restructure-template settings UI
+
 ## 0.6.0 — Simplify sidebar UI and harden PPTX/LLM conversion
 
 ### Changes
