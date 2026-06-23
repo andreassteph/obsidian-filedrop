@@ -111,6 +111,22 @@ export function rewriteImageLinks(markdown: string, dirName: string, filenames: 
 	return markdown.replace(re, (_m, name: string) => `](${encodeURI(`${dirName}/${name}`)})`);
 }
 
+// True when a note has no real body — only frontmatter and/or whitespace. Used to
+// decide whether a converted note may silently overwrite an existing file at the
+// target path. The leading YAML frontmatter block (if any) is stripped first; a
+// note with missing or unterminated frontmatter is handled gracefully (never
+// throws). A title heading or any other text counts as real content.
+export function isNoteContentEmpty(content: string): boolean {
+	let body = content.replace(/^﻿/, '');
+	if (/^\s*---\r?\n/.test(body)) {
+		// Drop everything up to and including the closing `---` fence. If there is
+		// no closing fence the whole note is frontmatter-only — treat as empty.
+		const match = body.match(/^\s*---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/);
+		body = match ? body.slice(match[0].length) : '';
+	}
+	return body.trim().length === 0;
+}
+
 // Rewrite the frontmatter `tags` field to an inline JSON array of quoted strings,
 // e.g. `tags: ["a","b"]`. Obsidian's Properties editor re-serializes tags as a
 // multi-line YAML block list (`tags:\n  - a\n  - b`); we match that whole block —

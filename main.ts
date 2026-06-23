@@ -19,7 +19,8 @@ import {
 	suggestTags,
 } from './src/settings';
 import { ConvertPhase, MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
+import { dedupeName, getMonthSlug, isNoteContentEmpty, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
+import { confirmModal } from './src/confirm-modal';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 
@@ -428,14 +429,10 @@ export default class FileDropPlugin extends Plugin {
 		let groupDirPath = normalizePath(`${subfolderPath}/${groupDirName}`);
 		await this.ensureDir(groupDirPath);
 
+		// Provisional name; collisions are resolved at write time (overwrite prompt
+		// or numbered copy) via writeNoteHandlingExisting.
 		let noteName = noteNameFromFile(groupDirName);
 		let notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
-		let dupIdx = 1;
-		while (await vault.adapter.exists(notePath)) {
-			dupIdx++;
-			noteName = noteNameFromFile(dedupeName(groupDirName, dupIdx));
-			notePath = normalizePath(`${subfolderPath}/${noteName}.md`);
-		}
 
 		const gateway = gatewayId
 			? (this.settings.llmGateways.find((g) => g.id === gatewayId) ?? null)
@@ -568,7 +565,11 @@ export default class FileDropPlugin extends Plugin {
 				combinedBody,
 			];
 
-			await vault.create(notePath, frontmatterLines.join('\n'));
+			const writtenPath = await this.writeNoteHandlingExisting(notePath, frontmatterLines.join('\n'));
+			if (writtenPath !== notePath) {
+				notePath = writtenPath;
+				entry.notePath = writtenPath;
+			}
 
 			entry.tags = [...mergedTags];
 			entry.status = anyError ? 'error' : anyWarning ? 'warning' : 'converted';
@@ -603,6 +604,62 @@ export default class FileDropPlugin extends Plugin {
 	getActiveView(): FileDropView | null {
 		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE);
 		return leaves.length > 0 ? (leaves[0].view as FileDropView) : null;
+	}
+
+	// Write a converted note at `notePath`, handling a pre-existing file at that
+	// path: an effectively-empty existing note (frontmatter/whitespace only) is
+	// overwritten silently; a non-empty one prompts the user — confirm overwrites,
+	// cancel falls back to a de-duplicated name. Returns the path actually written.
+	private async writeNoteHandlingExisting(notePath: string, content: string): Promise<string> {
+		const { vault } = this.app;
+
+		if (!(await vault.adapter.exists(notePath))) {
+			await vault.create(notePath, content);
+			return notePath;
+		}
+
+		// Existing file: decide whether it may be overwritten.
+		let existing: string;
+		try {
+			existing = await vault.adapter.read(notePath);
+		} catch {
+			// Unreadable — never blow it away silently; fall through to the prompt.
+			existing = 'unreadable';
+		}
+
+		const overwrite = async (): Promise<void> => {
+			const file = vault.getAbstractFileByPath(notePath);
+			if (file instanceof TFile) await vault.modify(file, content);
+			else await vault.adapter.write(notePath, content);
+		};
+
+		if (isNoteContentEmpty(existing)) {
+			await overwrite();
+			return notePath;
+		}
+
+		const confirmed = await confirmModal(this.app, {
+			title: 'Overwrite existing note?',
+			message: `A note already exists at "${notePath}". Overwrite it with the new conversion? Cancel to keep both (a numbered copy is created instead).`,
+			confirmText: 'Overwrite',
+			cancelText: 'Keep both',
+		});
+		if (confirmed) {
+			await overwrite();
+			return notePath;
+		}
+
+		// Declined — write to a fresh de-duplicated name alongside the existing note.
+		const dir = pathDirname(notePath);
+		const base = pathBasename(notePath);
+		let i = 1;
+		let candidate = notePath;
+		do {
+			i++;
+			candidate = normalizePath(`${dir}/${dedupeName(base, i)}`);
+		} while (await vault.adapter.exists(candidate));
+		await vault.create(candidate, content);
+		return candidate;
 	}
 
 	async processDroppedFile(
@@ -780,7 +837,11 @@ export default class FileDropPlugin extends Plugin {
 			}
 			frontmatterLines.push('---', '', markdownBody);
 
-			await vault.create(notePath, frontmatterLines.join('\n'));
+			const writtenPath = await this.writeNoteHandlingExisting(notePath, frontmatterLines.join('\n'));
+			if (writtenPath !== notePath) {
+				notePath = writtenPath;
+				entry.notePath = writtenPath;
+			}
 
 			entry.tags = [...mergedTags];
 			entry.status = (hasErrorCallout(markdownBody) || attachmentHadError) ? 'error'
