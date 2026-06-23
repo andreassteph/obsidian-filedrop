@@ -30,34 +30,37 @@ function typeHint(fm: Record<string, unknown>): string | null {
 	return null;
 }
 
-// Load every markdown file under `folderPath` (recursive) as a TemplateNote,
-// reading each one's frontmatter from the metadata cache and a short body
-// excerpt for matching context.
-export async function findTemplates(app: App, folderPath: string): Promise<TemplateNote[]> {
-	const trimmed = folderPath.replace(/\/+$/, '').trim();
-	if (!trimmed) return [];
-	const prefix = trimmed + '/';
-	const files = app.vault.getMarkdownFiles().filter((f) => f.path === trimmed || f.path.startsWith(prefix));
+async function loadTemplateNote(app: App, file: TFile): Promise<TemplateNote> {
+	const fm = app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+	// Strip Obsidian's internal `position` key the cache sometimes attaches.
+	const frontmatter: Record<string, unknown> = {};
+	for (const [k, v] of Object.entries(fm)) {
+		if (k === 'position') continue;
+		frontmatter[k] = v;
+	}
+	let bodyExcerpt = '';
+	try {
+		const content = await app.vault.read(file);
+		const fmEnd = content.indexOf('\n---\n');
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+		bodyExcerpt = body.trim().slice(0, 300);
+	} catch {
+		/* unreadable template — keep frontmatter only */
+	}
+	return { file, name: file.basename, frontmatter, bodyExcerpt };
+}
 
+// Load the configured template notes (vault-relative paths, e.g. from the
+// restructure pairs) as TemplateNotes, reading each one's frontmatter from the
+// metadata cache and a short body excerpt for matching context. Missing or
+// non-markdown paths are skipped; duplicate paths are loaded once.
+export async function loadTemplatesFromPaths(app: App, paths: string[]): Promise<TemplateNote[]> {
+	const unique = Array.from(new Set(paths.map((p) => p.trim()).filter(Boolean)));
 	const templates: TemplateNote[] = [];
-	for (const file of files) {
-		const fm = app.metadataCache.getFileCache(file)?.frontmatter ?? {};
-		// Strip Obsidian's internal `position` key the cache sometimes attaches.
-		const frontmatter: Record<string, unknown> = {};
-		for (const [k, v] of Object.entries(fm)) {
-			if (k === 'position') continue;
-			frontmatter[k] = v;
-		}
-		let bodyExcerpt = '';
-		try {
-			const content = await app.vault.read(file);
-			const fmEnd = content.indexOf('\n---\n');
-			const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
-			bodyExcerpt = body.trim().slice(0, 300);
-		} catch {
-			/* unreadable template — keep frontmatter only */
-		}
-		templates.push({ file, name: file.basename, frontmatter, bodyExcerpt });
+	for (const path of unique) {
+		const file = app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) continue;
+		templates.push(await loadTemplateNote(app, file));
 	}
 	return templates;
 }

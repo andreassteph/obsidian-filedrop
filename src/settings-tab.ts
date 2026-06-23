@@ -14,6 +14,7 @@ import {
 	probeModel,
 } from './settings';
 import { checkMarkitdownCli, checkPythonEnv, installPythonRequirements, PYTHON_REQUIREMENTS } from './convert';
+import { FileSuggest, FolderSuggest } from './path-suggest';
 import type FileDropPlugin from '../main';
 
 export class FileDropSettingTab extends PluginSettingTab {
@@ -293,27 +294,12 @@ export class FileDropSettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Templates
-		new Setting(containerEl).setName('Templates').setHeading();
-
-		new Setting(containerEl)
-			.setName('Template folder')
-			.setDesc('Vault-relative folder of note templates. The "Fix to template" action in the current-note panel matches a note to one of these templates and merges its frontmatter in. Leave empty to disable.')
-			.addText((text) =>
-				text
-					.setPlaceholder('e.g. Templates')
-					.setValue(this.plugin.settings.templateFolder)
-					.onChange(async (value) => {
-						this.plugin.settings.templateFolder = value.trim();
-						await this.plugin.saveSettings();
-					})
-			);
-
 		// Restructure templates
 		new Setting(containerEl).setName('Restructure templates').setHeading();
 		new Setting(containerEl).setDesc(
-			'Template ↔ main-folder pairs for the "Create a restructured note" action in the current-note panel. ' +
-			'Each pair binds a template note (headings with per-section guidance lines) to the folder where restructured notes are filed. ' +
+			'Template ↔ main-folder pairs, used by both the "Fix to template" and "Create a restructured note" actions in the current-note panel. ' +
+			'Each pair binds a template note (headings with per-section guidance lines) to the folder where restructured notes are filed — ' +
+			'"Fix to template" only uses the template note, ignoring the target folder. ' +
 			'The LLM suggests which pair fits the current note and which subfolder to use.',
 		);
 
@@ -649,28 +635,38 @@ export class FileDropSettingTab extends PluginSettingTab {
 		new Setting(wrapperEl)
 			.setName('Template path')
 			.setDesc('Vault-relative path to the template note (headings + guidance lines).')
-			.addText((text) =>
+			.addText((text) => {
 				text
 					.setPlaceholder('e.g. Templates/Meeting.md')
 					.setValue(pair.templatePath)
 					.onChange(async (value) => {
 						this.plugin.settings.restructureTemplates[idx].templatePath = value.trim();
 						await this.plugin.saveSettings();
-					}),
-			);
+					});
+				new FileSuggest(this.app, text.inputEl, async (file) => {
+					text.setValue(file.path);
+					this.plugin.settings.restructureTemplates[idx].templatePath = file.path;
+					await this.plugin.saveSettings();
+				});
+			});
 
 		new Setting(wrapperEl)
 			.setName('Target folder')
 			.setDesc('Vault-relative main folder where restructured notes are filed (a subfolder is suggested per note).')
-			.addText((text) =>
+			.addText((text) => {
 				text
 					.setPlaceholder('e.g. Meetings')
 					.setValue(pair.targetFolder)
 					.onChange(async (value) => {
 						this.plugin.settings.restructureTemplates[idx].targetFolder = value.trim();
 						await this.plugin.saveSettings();
-					}),
-			);
+					});
+				new FolderSuggest(this.app, text.inputEl, async (folder) => {
+					text.setValue(folder.path);
+					this.plugin.settings.restructureTemplates[idx].targetFolder = folder.path;
+					await this.plugin.saveSettings();
+				});
+			});
 	}
 
 	private renderReferenceGroup(containerEl: HTMLElement, group: ReferenceConditionGroup, idx: number): void {

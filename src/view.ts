@@ -3,7 +3,7 @@ import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obs
 import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
-import { findTemplates, rankTemplates } from './templates';
+import { loadTemplatesFromPaths, rankTemplates } from './templates';
 import { loadRestructurePairs, rankRestructurePairs } from './restructure';
 import { ReferenceModal } from './reference-modal';
 import { TemplateModal } from './template-modal';
@@ -60,7 +60,7 @@ export class FileDropView extends ItemView {
 		if (this.plugin.settings.referenceGroups.length > 0) {
 			this.createIconActionButton(this.currentNoteActionRow, 'link', 'Find and add references to matching notes', () => this.addReferencesForCurrentNote());
 		}
-		if (this.plugin.settings.templateFolder.trim()) {
+		if (this.plugin.settings.restructureTemplates.some((p) => p.templatePath.trim())) {
 			this.createIconActionButton(this.currentNoteActionRow, 'layout-template', 'Fix frontmatter to the matching template', () => this.fixCurrentNoteToTemplate());
 		}
 		if (this.plugin.settings.restructureTemplates.length > 0) {
@@ -661,11 +661,11 @@ export class FileDropView extends ItemView {
 			return;
 		}
 
-		const folder = this.plugin.settings.templateFolder.trim();
-		const templates = (await findTemplates(this.app, folder))
+		const paths = this.plugin.settings.restructureTemplates.map((p) => p.templatePath);
+		const templates = (await loadTemplatesFromPaths(this.app, paths))
 			.filter((t) => t.file.path !== file.path); // never match a note to itself
 		if (templates.length === 0) {
-			new Notice('FileDrop: no templates found in the configured template folder.');
+			new Notice('FileDrop: no configured templates found. Add one under Restructure templates in settings.');
 			return;
 		}
 
