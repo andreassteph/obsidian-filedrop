@@ -268,7 +268,7 @@ export async function matchCandidatesWithLLM(
 
 export async function generateTodoTask(
 	intent: string,
-	context: { title: string; summary: string; date: string | null },
+	context: { title: string; summary: string; date: string | null; cursorContext?: string },
 	gateway: LlmGateway,
 	today: string,
 	promptRules: string,
@@ -282,6 +282,7 @@ export async function generateTodoTask(
 		`Note title: ${context.title}`,
 		context.date ? `Document date: ${context.date}` : '',
 		context.summary ? `Note summary: ${context.summary.slice(0, 2000)}` : '',
+		context.cursorContext ? `Cursor context:\n${context.cursorContext.slice(0, 1500)}` : '',
 	].filter(Boolean).join('\n');
 	const user = `${contextLines}\n\nTodo request: ${intent}`;
 
@@ -296,7 +297,9 @@ export async function generateTodoTask(
 				{ role: 'system', content: system },
 				{ role: 'user', content: user },
 			],
-			maxTokens: 300,
+			// Generous budget: reasoning models can spend most of a small cap on
+			// hidden thinking and return an empty task line otherwise.
+			maxTokens: 600,
 			temperature: 0,
 			timeoutMs: REFERENCE_TIMEOUT_MS,
 		},
