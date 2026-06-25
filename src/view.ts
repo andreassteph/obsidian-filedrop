@@ -1,11 +1,12 @@
-import { App, ItemView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
+import { App, Editor, ItemView, MarkdownView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
 import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
 import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
-import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, MatchedNote } from './references';
+import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, insertTaskIntoNote, MatchedNote } from './references';
 import { loadTemplatesFromPaths, rankTemplates } from './templates';
 import { loadRestructurePairs, rankRestructurePairs } from './restructure';
 import { ReferenceModal } from './reference-modal';
+import { CreateTodoModal } from './create-todo-modal';
 import { TemplateModal } from './template-modal';
 import { RestructureModal } from './restructure-modal';
 import type FileDropPlugin from '../main';
@@ -57,6 +58,7 @@ export class FileDropView extends ItemView {
 
 		this.createIconActionButton(this.currentNoteActionRow, 'file-text', 'Generate summary with the selected LLM', () => this.summarizeCurrentNote());
 		this.createIconActionButton(this.currentNoteActionRow, 'tags', 'Suggest tags with the selected LLM', () => this.suggestTagsForCurrentNote());
+		this.createIconActionButton(this.currentNoteActionRow, 'list-checks', 'Create a follow-up todo for this note', () => this.createTodoForCurrentNote());
 		if (this.plugin.settings.referenceGroups.length > 0) {
 			this.createIconActionButton(this.currentNoteActionRow, 'link', 'Find and add references to matching notes', () => this.addReferencesForCurrentNote());
 		}
@@ -652,6 +654,83 @@ export class FileDropView extends ItemView {
 			return;
 		}
 		await this.addReferencesForNote(file);
+	}
+
+	// Standalone follow-up-todo action: prompt for what the todo should be, give
+	// the LLM the current note + cursor surroundings as context, and insert the
+	// resulting Obsidian Tasks line at the cursor (or, when no live editor, file
+	// it under the configured Tasks section).
+	async createTodoForCurrentNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+
+		// Capture the live editor + cursor up front: opening the modal moves
+		// focus away, and the cursor is both the LLM context and the insert point.
+		const mdView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		const editor: Editor | null = mdView && mdView.file?.path === file.path ? mdView.editor : null;
+		const cursor = editor ? editor.getCursor() : null;
+
+		const rawFm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		const summary: string = typeof rawFm.summary === 'string' ? rawFm.summary : '';
+		const date: string | null = rawFm.file_date ? String(rawFm.file_date) : null;
+		const cursorContext = editor && cursor ? this.buildCursorContext(editor, cursor.line) : undefined;
+
+		new CreateTodoModal(
+			this.app,
+			gateway,
+			{ title: file.basename, summary, date, cursorContext },
+			this.plugin.settings.todoPrompt,
+			() => this.plugin.saveSettings(),
+			async (taskLine) => {
+				if (editor && cursor) {
+					// Insert on its own line at the cursor's line rather than
+					// splitting the line mid-word.
+					editor.replaceRange(`${taskLine}\n`, { line: cursor.line, ch: 0 });
+					new Notice('FileDrop: todo inserted.');
+					return;
+				}
+				// No live editor (e.g. reading mode) — file under the Tasks section.
+				try {
+					const current = await this.app.vault.read(file);
+					const updated = insertTaskIntoNote(current, taskLine, this.plugin.settings.todoSection);
+					await this.app.vault.modify(file, updated);
+					new Notice('FileDrop: todo added.');
+				} catch (e) {
+					console.error('FileDrop: failed to write todo to', file.path, e);
+					new Notice('FileDrop: could not write the todo (see console).');
+				}
+			},
+		).open();
+	}
+
+	// A small window of text around the cursor, prefixed with the nearest
+	// preceding heading, so the LLM knows what "this" refers to.
+	private buildCursorContext(editor: Editor, line: number): string {
+		const total = editor.lineCount();
+		const start = Math.max(0, line - 5);
+		const end = Math.min(total - 1, line + 5);
+
+		const parts: string[] = [];
+		for (let i = line; i >= 0; i--) {
+			const text = editor.getLine(i);
+			if (/^#{1,6}\s/.test(text)) {
+				parts.push(text.trim());
+				break;
+			}
+		}
+
+		const window: string[] = [];
+		for (let i = start; i <= end; i++) {
+			const text = editor.getLine(i);
+			window.push(i === line ? `→ ${text}` : text);
+		}
+		parts.push(window.join('\n'));
+		return parts.join('\n').trim();
 	}
 
 	private async fixCurrentNoteToTemplate(): Promise<void> {

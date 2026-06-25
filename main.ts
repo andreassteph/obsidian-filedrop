@@ -82,6 +82,18 @@ export default class FileDropPlugin extends Plugin {
 			name: 'Scan external folder',
 			callback: () => this.scanExternalFolder(this.getActiveView()?.selectedGatewayId ?? null),
 		});
+		this.addCommand({
+			id: 'filedrop-create-todo',
+			name: 'Create todo for current note',
+			callback: () => {
+				const view = this.getActiveView();
+				if (!view) {
+					new Notice('FileDrop: open the FileDrop sidebar first.');
+					return;
+				}
+				void view.createTodoForCurrentNote();
+			},
+		});
 		this.addSettingTab(new FileDropSettingTab(this.app, this));
 		this.app.workspace.onLayoutReady(() => this.syncIncomingFolder());
 	}

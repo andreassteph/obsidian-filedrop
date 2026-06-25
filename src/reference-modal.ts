@@ -142,6 +142,8 @@ export class ReferenceModal extends Modal {
 					if (result.ok && result.value) {
 						todoInput.value = result.value;
 					} else {
+						if (!result.ok) console.error('FileDrop: generate todo failed', result.reason, result.detail);
+						else console.error('FileDrop: generate todo returned an empty task line');
 						new Notice('FileDrop: could not generate todo (see console).');
 					}
 				} finally {
@@ -217,13 +219,18 @@ export class ReferenceModal extends Modal {
 					new Notice('FileDrop: no note selected for the todo — skipped.');
 				} else {
 					const taskLine = normalizeTaskLine(todoText);
-					try {
-						const current = await this.app.vault.read(target.candidate.file);
-						const updated = insertTaskIntoNote(current, taskLine, this.plugin.settings.todoSection);
-						await this.app.vault.modify(target.candidate.file, updated);
-						todoCount = 1;
-					} catch (e) {
-						console.error('FileDrop: failed to write todo to', target.candidate.file.path, e);
+					if (!taskLine) {
+						new Notice('FileDrop: the todo was empty — skipped.');
+					} else {
+						try {
+							const current = await this.app.vault.read(target.candidate.file);
+							const updated = insertTaskIntoNote(current, taskLine, this.plugin.settings.todoSection);
+							await this.app.vault.modify(target.candidate.file, updated);
+							todoCount = 1;
+						} catch (e) {
+							console.error('FileDrop: failed to write todo to', target.candidate.file.path, e);
+							new Notice(`FileDrop: could not write the todo to ${target.candidate.name} (see console).`);
+						}
 					}
 				}
 			}
