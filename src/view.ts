@@ -1,10 +1,11 @@
 import { App, Editor, ItemView, MarkdownView, Modal, Notice, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 
 import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConvertingStatus, isGatewayEnabled, parsePreferredTags, reviseSummary, suggestTags, summarizeContent } from './settings';
-import { extFromMime, pastedBaseName, replaceTagsBlock } from './utils';
+import { extFromMime, pastedBaseName } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, insertTaskIntoNote, MatchedNote } from './references';
 import { loadTemplatesFromPaths, rankTemplates } from './templates';
 import { loadRestructurePairs, rankRestructurePairs } from './restructure';
+import { rewriteNoteTags, writeNoteSummary, writeNoteSummaryAndMetadata } from './note-tools';
 import { ReferenceModal } from './reference-modal';
 import { CreateTodoModal } from './create-todo-modal';
 import { TemplateModal } from './template-modal';
@@ -808,70 +809,20 @@ export class FileDropView extends ItemView {
 		new RestructureModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
-	private async writeNoteSummary(notePath: string, summary: string): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(notePath);
-		if (!(file instanceof TFile)) return;
-		const content = await this.app.vault.read(file);
-		const line = `summary: ${JSON.stringify(summary)}`;
-		let updated: string;
-		if (/^summary:.*$/m.test(content)) {
-			updated = content.replace(/^summary:.*$/m, line);
-		} else {
-			const c = content.indexOf('\n---\n');
-			if (c < 0) return;
-			updated = content.slice(0, c) + '\n' + line + content.slice(c);
-		}
-		await this.app.vault.modify(file, updated);
+	private writeNoteSummary(notePath: string, summary: string): Promise<void> {
+		return writeNoteSummary(this.app, notePath, summary);
 	}
 
-	private async writeNoteSummaryAndMetadata(
+	private writeNoteSummaryAndMetadata(
 		notePath: string,
 		summary: string,
 		metadata: { date: string | null; type: string | null; people: string[] | null },
 	): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(notePath);
-		if (!(file instanceof TFile)) return;
-		const content = await this.app.vault.read(file);
-
-		const fmEndIndex = content.indexOf('\n---\n');
-		if (fmEndIndex < 0) return;
-
-		const fmStart = content.slice(0, fmEndIndex);
-		const fmBody = content.slice(fmEndIndex);
-
-		// Build replacement lines for frontmatter fields
-		const lines: string[] = [];
-		lines.push(`summary: ${JSON.stringify(summary)}`);
-		if (metadata.date) lines.push(`file_date: ${JSON.stringify(metadata.date)}`);
-		if (metadata.type) lines.push(`file_type: ${JSON.stringify(metadata.type)}`);
-		if (metadata.people && metadata.people.length > 0) {
-			lines.push(`file_people: [${metadata.people.map((p) => JSON.stringify(p)).join(', ')}]`);
-		}
-
-		const newLines = lines.join('\n');
-
-		// Replace existing lines or add new ones
-		let updated = fmStart;
-		for (const line of lines) {
-			const field = line.split(':')[0];
-			const fieldRegex = new RegExp(`^${field}:.*$`, 'm');
-			if (fieldRegex.test(updated)) {
-				updated = updated.replace(fieldRegex, line);
-			} else {
-				updated += '\n' + line;
-			}
-		}
-		updated += fmBody;
-
-		await this.app.vault.modify(file, updated);
+		return writeNoteSummaryAndMetadata(this.app, notePath, summary, metadata);
 	}
 
-	private async rewriteNoteTags(notePath: string, tags: string[]): Promise<void> {
-		const file = this.app.vault.getAbstractFileByPath(notePath);
-		if (!(file instanceof TFile)) return;
-		const content = await this.app.vault.read(file);
-		const updated = replaceTagsBlock(content, tags);
-		await this.app.vault.modify(file, updated);
+	private rewriteNoteTags(notePath: string, tags: string[]): Promise<void> {
+		return rewriteNoteTags(this.app, notePath, tags);
 	}
 
 	private async rewriteNoteVerified(notePath: string): Promise<void> {

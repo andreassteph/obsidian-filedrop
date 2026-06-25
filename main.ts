@@ -22,6 +22,7 @@ import { ConvertPhase, MsgAttachment, OnPhase, OnProgress, convertPptx, runMarki
 import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
+import { FileDropApi, NoteTools, buildFileDropApi } from './src/note-tools';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const { join: pathJoin, dirname: pathDirname, basename: pathBasename } = require('path') as typeof import('path');
@@ -45,6 +46,10 @@ const externalFileUrl = (absPath: string): string => {
 export default class FileDropPlugin extends Plugin {
 	settings: FileDropSettings;
 	recentFiles: DroppedFile[];
+
+	// In-process API for the current-note tools (QuickAdd-style). Reachable via
+	// app.plugins.plugins["obsidian-filedrop"].api once the plugin has loaded.
+	api: FileDropApi;
 
 	// Cancellation tokens for in-flight conversions (keyed by notePath)
 	private cancelledConversions = new Set<string>();
@@ -70,6 +75,7 @@ export default class FileDropPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
+		this.api = buildFileDropApi(new NoteTools(this.app, this));
 		this.registerView(VIEW_TYPE, (leaf) => new FileDropView(leaf, this));
 		this.addRibbonIcon('inbox', 'FileDrop', () => this.activateView());
 		this.addCommand({

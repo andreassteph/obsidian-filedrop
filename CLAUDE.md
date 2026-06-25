@@ -28,6 +28,7 @@ vision/OCR LLM calls embedded in it.
 - `src/restructure-modal.ts` — `RestructureModal`, the UI that confirms the matched pair, suggests/edits the target subfolder (re-suggested when the pair changes), then creates the restructured + fact-checked note (with a `source` back-link to the original) and opens it.
 - `src/settings-tab.ts` — settings UI panel (LLM gateway config, model dropdown, "Check" probe, reference groups, restructure-template pairs).
 - `src/view.ts` — sidebar drop-zone UI and per-file/per-note actions ("Add summary", "Suggest tags", "Add references", "Fix to template", "Create restructured note"). Orchestrates the reference flow: extract metadata → `fillMetadataWithLLM` → `summarizeContent` → `matchCandidatesWithLLM` → open `ReferenceModal`; the template flow: `loadTemplatesFromPaths` → `rankTemplates` → open `TemplateModal` (→ `fillTemplateFrontmatter` → `applyTemplateFrontmatter`); and the restructure flow: `loadRestructurePairs` → `rankRestructurePairs` → open `RestructureModal` (→ `suggestSubfolder` → `restructureNoteBody` → `factCheckNoteBody` → create note).
+- `src/note-tools.ts` — **headless current-note tools + in-process API.** `NoteTools(app, plugin)` exposes the per-note actions without any UI (no `Notice`/`Modal`): each method takes a typed options object — `note` (path/basename, **defaults to the active note**), `gateway` (id/name), `preview` — and returns a serializable `{ ok, … } | { ok: false, reason, detail }`, reusing the same LLM helpers the view does. `resolveNote()`/`resolveGateway()` map the params to a `TFile`/gateway. `buildFileDropApi()` builds the `FileDropApi` object assigned to `plugin.api` in `main.ts` (reachable at `app.plugins.plugins["obsidian-filedrop"].api`, QuickAdd-style — see `## API`). Also home to the shared frontmatter writers `writeNoteSummary()`/`writeNoteSummaryAndMetadata()`/`rewriteNoteTags()` (lifted out of `view.ts`, which now delegates to them — one write path for both sidebar and API).
 - `src/utils.ts` — shared helpers.
 
 ### Python (`python/`)
@@ -86,6 +87,39 @@ pass the active gateway and its detected capabilities to Python:
 
 These mirror the TS `ModelCapabilities` so Python builds requests the same way
 `callChat()` does — keep the two sides in sync when adding a capability.
+
+## API (current-note tools)
+
+The current-note tools are exposed as an **in-process JavaScript API** (the
+QuickAdd model — **no HTTP server, port, or token**; the trust boundary is code
+already running in the vault). It lives in `src/note-tools.ts` and is assigned to
+`plugin.api` in `main.ts:onload()`, reachable from Templater / `dataviewjs` /
+QuickAdd scripts / other plugins via:
+
+```js
+app.plugins.plugins["obsidian-filedrop"].api
+```
+
+Every method takes one options object and returns `{ ok, … } | { ok: false, reason, detail }`.
+Common options: `note` (path/basename, **defaults to the active note**), `gateway`
+(id/name; defaults to the sidebar's selected gateway, then the first enabled one),
+and `preview` (when `true`, return the result without writing it — default is apply).
+`reason` is an `LlmOpError` or one of `note-not-found` / `note-ambiguous` /
+`not-markdown` / `no-gateway`.
+
+The tools are rolled out in phases. **Currently only Phase 1 is implemented:**
+
+- **Phase 1 — implemented:**
+  - `summarize({ instruction?, includeMetadata? })` — fresh summary (+ `file_date`/`file_type`/`file_people` metadata when `includeMetadata`, default true), or revise the existing summary when `instruction` is given.
+  - `suggestTags({ maxTags?, merge? })` — suggest tags and write `tags` (union with existing by default; `merge: false` replaces).
+- **Phase 2 — not yet implemented:** `createTodo({ intent, targetNote?, section?, raw? })`, `addReferences({ maxMatches?, targets?, todo? })`, `fixToTemplate({ template? })`.
+- **Phase 3 — not yet implemented:** `restructure({ pair?, title, subfolder? })` (creates a new note).
+
+When building Phase 2/3, reuse the existing LLM helpers (in `references.ts` /
+`templates.ts` / `restructure.ts`) and route any note writes through the shared
+writers in `note-tools.ts` — each former modal choice becomes an explicit
+parameter (e.g. `intent`, `template`, `title`, `targets`). Full per-tool
+parameter spec: the plan at `we-are-now-creating-lexical-umbrella.md`.
 
 ## Dev
 
