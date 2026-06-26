@@ -1,5 +1,14 @@
 # Release Notes
 
+## 0.6.2 — Iterative todo revision with richer note context
+
+### Changes
+
+- Add a standalone "Create todo" command for generating a follow-up task on the current note
+- Let "Generate" revise the existing task line based on a follow-up instruction, or regenerate it from scratch when left blank
+- Give the LLM the full note content and the cursor's enclosing section (not just a short summary/line window) so generated todos read understandably on their own
+- Harden todo generation prompts to keep descriptions self-contained
+
 ## 0.6.1 — Add note-template workflows for frontmatter fixing and restructuring
 
 ### Changes
