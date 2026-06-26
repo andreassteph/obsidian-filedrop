@@ -1,5 +1,12 @@
 # Release Notes
 
+## 0.6.3 — Fix PPTX attachments in .msg and harden todo generation
+
+### Changes
+
+- Fix .pptx attachments inside .msg files to go through the structured PPTX path (extracted images + slide reflow) instead of flat markitdown output, and avoid doubling LLM vision calls
+- Make generateTodoTask retry and report failure instead of silently returning an empty task line
+
 ## 0.6.2 — Iterative todo revision with richer note context
 
 ### Changes
