@@ -302,25 +302,37 @@ export async function generateTodoTask(
 	// Route through callChat so this honors the model's detected capabilities
 	// (token-param name, system-role folding) and auto-corrects on a parameter
 	// error — the same path used by the other reference LLM helpers.
-	const result = await callChat(
-		gateway,
-		{
-			label: 'generateTodo',
-			messages: [
-				{ role: 'system', content: system },
-				{ role: 'user', content: user },
-			],
-			// Generous budget: reasoning models can spend most of a small cap on
-			// hidden thinking and return an empty task line otherwise.
-			maxTokens: 600,
-			temperature: 0,
-			timeoutMs: REFERENCE_TIMEOUT_MS,
-		},
-		persist
-	);
-	if (!result.ok) return result;
+	const attempt = (maxTokens: number, extraSystem?: string) =>
+		callChat(
+			gateway,
+			{
+				label: 'generateTodo',
+				messages: [
+					{ role: 'system', content: extraSystem ? `${system}\n${extraSystem}` : system },
+					{ role: 'user', content: user },
+				],
+				maxTokens,
+				temperature: 0,
+				timeoutMs: REFERENCE_TIMEOUT_MS,
+			},
+			persist
+		);
 
-	return { ok: true, value: normalizeTaskLine(result.value) };
+	// Reasoning models spend hidden thinking tokens out of the same budget and
+	// can come back with nothing left for the actual task line. Give the first
+	// try a generous cap, and if it still comes back empty, retry once with an
+	// even larger cap plus an explicit instruction to skip the reasoning.
+	let result = await attempt(1600);
+	if (!result.ok) return result;
+	let task = normalizeTaskLine(result.value);
+	if (!task) {
+		result = await attempt(3000, 'Respond with only the final task line — no reasoning, no explanation.');
+		if (!result.ok) return result;
+		task = normalizeTaskLine(result.value);
+	}
+	if (!task) return { ok: false, reason: 'no-reply' };
+
+	return { ok: true, value: task };
 }
 
 // Reduce an LLM reply (or raw user text) to a single Obsidian Tasks line.
