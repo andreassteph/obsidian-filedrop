@@ -1,6 +1,6 @@
 {
   "name": "obsidian-filedrop",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "Obsidian plugin for file drag & drop via markitdown",
   "main": "main.js",
   "scripts": {
