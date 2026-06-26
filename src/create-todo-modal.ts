@@ -13,7 +13,7 @@ export class CreateTodoModal extends Modal {
 	constructor(
 		app: App,
 		private readonly gateway: LlmGateway | null,
-		private readonly ctx: { title: string; summary: string; date: string | null; cursorContext?: string },
+		private readonly ctx: { title: string; summary: string; date: string | null; noteContent?: string; cursorContext?: string },
 		private readonly todoPrompt: string,
 		private readonly persist: () => Promise<void>,
 		private readonly onInsert: (taskLine: string) => Promise<void>,
@@ -26,12 +26,13 @@ export class CreateTodoModal extends Modal {
 
 		this.contentEl.createEl('h3', { text: 'Create todo' });
 
-		this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: "What's the follow-up?" });
+		const instructionLabel = this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: "What's the follow-up?" });
 		const instructionInput = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
 		instructionInput.placeholder = gatewayActive
 			? 'e.g. follow up in a month'
 			: 'e.g. - [ ] follow up with the team';
 		instructionInput.rows = 3;
+		let hasGenerated = false;
 
 		this.contentEl.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Task line' });
 		const taskInput = this.contentEl.createEl('textarea', { cls: 'filedrop-change-summary-input' });
@@ -46,7 +47,7 @@ export class CreateTodoModal extends Modal {
 			const generateBtn = buttons.createEl('button', { cls: 'mod-cta', text: 'Generate' });
 			generateBtn.addEventListener('click', async () => {
 				const intent = instructionInput.value.trim();
-				if (!intent) {
+				if (!hasGenerated && !intent) {
 					new Notice('FileDrop: type what the todo should be first.');
 					return;
 				}
@@ -54,9 +55,14 @@ export class CreateTodoModal extends Modal {
 				generateBtn.textContent = 'Generating…';
 				try {
 					const today = new Date().toISOString().slice(0, 10);
-					const result = await generateTodoTask(intent, this.ctx, this.gateway!, today, this.todoPrompt, this.persist);
+					const currentTask = hasGenerated ? taskInput.value.trim() : undefined;
+					const result = await generateTodoTask(intent, this.ctx, this.gateway!, today, this.todoPrompt, this.persist, currentTask);
 					if (result.ok && result.value) {
 						taskInput.value = result.value;
+						hasGenerated = true;
+						instructionLabel.textContent = 'What to change?';
+						instructionInput.value = '';
+						instructionInput.placeholder = 'e.g. push it out a week — leave blank to regenerate';
 					} else {
 						if (!result.ok) console.error('FileDrop: generate todo failed', result.reason, result.detail);
 						else console.error('FileDrop: generate todo returned an empty task line');

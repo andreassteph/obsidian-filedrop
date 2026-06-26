@@ -680,11 +680,12 @@ export class FileDropView extends ItemView {
 		const summary: string = typeof rawFm.summary === 'string' ? rawFm.summary : '';
 		const date: string | null = rawFm.file_date ? String(rawFm.file_date) : null;
 		const cursorContext = editor && cursor ? this.buildCursorContext(editor, cursor.line) : undefined;
+		const noteContent = (editor ? editor.getValue() : await this.app.vault.read(file)).slice(0, 6000);
 
 		new CreateTodoModal(
 			this.app,
 			gateway,
-			{ title: file.basename, summary, date, cursorContext },
+			{ title: file.basename, summary, date, noteContent, cursorContext },
 			this.plugin.settings.todoPrompt,
 			() => this.plugin.saveSettings(),
 			async (taskLine) => {
@@ -709,29 +710,35 @@ export class FileDropView extends ItemView {
 		).open();
 	}
 
-	// A small window of text around the cursor, prefixed with the nearest
-	// preceding heading, so the LLM knows what "this" refers to.
+	// The full section enclosing the cursor — from the nearest preceding
+	// heading down to the next heading (or end of file) — with the cursor's
+	// own line marked, so the LLM has the whole subject "this" refers to
+	// rather than just a fixed window of lines.
 	private buildCursorContext(editor: Editor, line: number): string {
 		const total = editor.lineCount();
-		const start = Math.max(0, line - 5);
-		const end = Math.min(total - 1, line + 5);
 
-		const parts: string[] = [];
+		let start = 0;
 		for (let i = line; i >= 0; i--) {
-			const text = editor.getLine(i);
-			if (/^#{1,6}\s/.test(text)) {
-				parts.push(text.trim());
+			if (/^#{1,6}\s/.test(editor.getLine(i))) {
+				start = i;
 				break;
 			}
 		}
 
-		const window: string[] = [];
+		let end = total - 1;
+		for (let i = line + 1; i < total; i++) {
+			if (/^#{1,6}\s/.test(editor.getLine(i))) {
+				end = i - 1;
+				break;
+			}
+		}
+
+		const section: string[] = [];
 		for (let i = start; i <= end; i++) {
 			const text = editor.getLine(i);
-			window.push(i === line ? `→ ${text}` : text);
+			section.push(i === line ? `→ ${text}` : text);
 		}
-		parts.push(window.join('\n'));
-		return parts.join('\n').trim();
+		return section.join('\n').trim().slice(0, 3000);
 	}
 
 	private async fixCurrentNoteToTemplate(): Promise<void> {

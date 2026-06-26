@@ -173,7 +173,7 @@ export const DEFAULT_TODO_PROMPT = [
 	'  📅 due date · ⏳ scheduled date · 🛫 start date · 🔁 recurrence (e.g. "🔁 every month")',
 	'  priority: 🔺 highest, ⏫ high, 🔼 medium, 🔽 low, ⏬ lowest',
 	'Resolve relative dates from today. A "follow up in <period>" request is a SCHEDULED date (⏳) today + that period.',
-	'Keep the description short and actionable, referencing the note when helpful.',
+	'Keep the description short and actionable, but self-contained — include enough context (what document/topic/person it concerns) that the task is understandable on its own, without opening the note.',
 	'Return ONLY the single task line, with no surrounding text, quotes, or code fences.',
 ].join('\n');
 

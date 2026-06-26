@@ -268,11 +268,12 @@ export async function matchCandidatesWithLLM(
 
 export async function generateTodoTask(
 	intent: string,
-	context: { title: string; summary: string; date: string | null; cursorContext?: string },
+	context: { title: string; summary: string; date: string | null; noteContent?: string; cursorContext?: string },
 	gateway: LlmGateway,
 	today: string,
 	promptRules: string,
 	persist?: () => Promise<void>,
+	currentTask?: string,
 ): Promise<LlmResult<string>> {
 	if (!isGatewayEnabled(gateway)) return { ok: false, reason: 'api-error', detail: 'no gateway configured' };
 	if (!isGatewayUrlSecure(gateway.baseUrl)) return { ok: false, reason: 'insecure-url' };
@@ -282,9 +283,21 @@ export async function generateTodoTask(
 		`Note title: ${context.title}`,
 		context.date ? `Document date: ${context.date}` : '',
 		context.summary ? `Note summary: ${context.summary.slice(0, 2000)}` : '',
-		context.cursorContext ? `Cursor context:\n${context.cursorContext.slice(0, 1500)}` : '',
+		context.noteContent ? `Full note content:\n${context.noteContent.slice(0, 6000)}` : '',
+		context.cursorContext ? `Cursor context:\n${context.cursorContext.slice(0, 3000)}` : '',
 	].filter(Boolean).join('\n');
-	const user = `${contextLines}\n\nTodo request: ${intent}`;
+	// Three modes: revise an existing task line per an instruction, generate
+	// fresh from an intent (original behavior), or — when called again with no
+	// instruction — regenerate from scratch per the guidelines, discarding
+	// whatever task line was there before.
+	let user: string;
+	if (intent && currentTask) {
+		user = `${contextLines}\n\nCurrent task line: ${currentTask}\n\nRequested change: ${intent}\n\nUpdate the task line to reflect the requested change. Keep it a single Tasks-formatted line.`;
+	} else if (intent) {
+		user = `${contextLines}\n\nTodo request: ${intent}`;
+	} else {
+		user = `${contextLines}\n\nGenerate a sensible follow-up task line based on the note context and the guidelines above.`;
+	}
 
 	// Route through callChat so this honors the model's detected capabilities
 	// (token-param name, system-role folding) and auto-corrects on a parameter

@@ -93,11 +93,18 @@ export class ReferenceModal extends Modal {
 		const todoBox = contentEl.createDiv({ cls: 'filedrop-ref-modal-todo' });
 		todoBox.style.display = 'none';
 
+		const todoInstructionLabel = todoBox.createEl('div', { cls: 'filedrop-summary-compare-label', text: "What's the follow-up?" });
 		const todoInput = todoBox.createEl('textarea', { cls: 'filedrop-ref-modal-todo-input' });
 		todoInput.placeholder = gatewayActive
 			? 'e.g. follow up in a month'
 			: 'e.g. - [ ] follow up with the team';
 		todoInput.rows = 2;
+		let hasGeneratedTodo = false;
+
+		todoBox.createEl('div', { cls: 'filedrop-summary-compare-label', text: 'Task line' });
+		const todoTaskInput = todoBox.createEl('textarea', { cls: 'filedrop-ref-modal-todo-input' });
+		todoTaskInput.placeholder = '- [ ] …';
+		todoTaskInput.rows = 2;
 
 		// "Add to" target dropdown — only relevant when more than one note is selected.
 		const targetRow = todoBox.createDiv({ cls: 'filedrop-ref-modal-todo-target' });
@@ -123,7 +130,7 @@ export class ReferenceModal extends Modal {
 			const genBtn = genRow.createEl('button', { text: 'Generate' });
 			genBtn.addEventListener('click', async () => {
 				const intent = todoInput.value.trim();
-				if (!intent) {
+				if (!hasGeneratedTodo && !intent) {
 					new Notice('FileDrop: type what the todo should be first.');
 					return;
 				}
@@ -131,16 +138,23 @@ export class ReferenceModal extends Modal {
 				genBtn.textContent = 'Generating…';
 				try {
 					const today = new Date().toISOString().slice(0, 10);
+					const currentTask = hasGeneratedTodo ? todoTaskInput.value.trim() : undefined;
+					const noteContent = (await this.app.vault.read(this.noteFile)).slice(0, 6000);
 					const result = await generateTodoTask(
 						intent,
-						{ title: this.noteFile.basename, summary: this.summary, date: this.metadata.date },
+						{ title: this.noteFile.basename, summary: this.summary, date: this.metadata.date, noteContent },
 						this.gateway!,
 						today,
 						this.plugin.settings.todoPrompt,
 						() => this.plugin.saveSettings(),
+						currentTask,
 					);
 					if (result.ok && result.value) {
-						todoInput.value = result.value;
+						todoTaskInput.value = result.value;
+						hasGeneratedTodo = true;
+						todoInstructionLabel.textContent = 'What to change?';
+						todoInput.value = '';
+						todoInput.placeholder = 'e.g. push it out a week — leave blank to regenerate';
 					} else {
 						if (!result.ok) console.error('FileDrop: generate todo failed', result.reason, result.detail);
 						else console.error('FileDrop: generate todo returned an empty task line');
@@ -212,7 +226,7 @@ export class ReferenceModal extends Modal {
 
 			// Optional follow-up todo, written into a single selected note.
 			let todoCount = 0;
-			const todoText = todoInput.value.trim();
+			const todoText = todoTaskInput.value.trim() || todoInput.value.trim();
 			if (todoCheckbox.checked && todoText) {
 				const target = selectedTodoTarget();
 				if (!target) {
