@@ -34,7 +34,7 @@ vision/OCR LLM calls embedded in it.
 ### Python (`python/`)
 
 - `python/filedrop_convert.py` — **core markitdown + LLM conversion.** `build_converter()` instantiates `MarkItDown` with an optional OpenAI client; `convert()` runs the conversion; `_convert_pdf_pages_with_llm()` does page-by-page OCR for scanned PDFs; `_convert_without_llm()` is the text-only fallback; `describe()` guesses unsupported file types. `convert_pptx_structured()` (the `--pptx` mode) bypasses markitdown for `.pptx`: it reads the deck with `python-pptx`, emits per-slide JSON of shapes-with-geometry, writes each embedded picture's bytes to a temp dir under markitdown's `re.sub(r"\W","",shape.name)+".jpg"` name, and (when vision is enabled) describes each image via the LLM (`_describe_image`, reusing the PDF-page 413 guard). Honors capability env vars (`_token_kwargs`, `_vision_enabled`, `_temperature_kwargs`, `_llm_timeout`).
-- `python/filedrop_msg.py` — Outlook `.msg` extraction with attachments, reusing the same markitdown + LLM PDF fallback (helpers duplicated here so it stays self-contained).
+- `python/filedrop_msg.py` — Outlook `.msg` extraction with attachments, reusing the same markitdown + LLM PDF fallback (helpers duplicated here so it stays self-contained). Each attachment is converted via `_convert_file()` **except `.pptx`**, which is left unconverted (empty `markdown`) so the TS side can run it through the structured PPTX path instead (`main.ts:convertMsgAttachmentBody()` → `convertPptxNote()`, reading the bytes back via the attachment's `temp_path`).
 - `python/manual_convert.py` — standalone interactive CLI wrapper around `filedrop_convert.py` (prompts for LLM config + file path); for manual testing outside Obsidian.
 
 ## How conversion & LLM wiring works

@@ -224,6 +224,40 @@ def test_convert_msg_writes_attachment_to_temp_file(tmp_path):
     shutil.rmtree(os.path.dirname(a["temp_path"]), ignore_errors=True)
 
 
+def test_convert_msg_skips_pptx_attachment_conversion(tmp_path):
+    """A .pptx attachment is left unconverted (empty markdown) so the TS side can
+    run the structured PPTX path — but its bytes are still written to temp_path."""
+    import os
+    import shutil
+
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    att = types.SimpleNamespace(longFilename="deck.pptx", shortFilename=None, data=b"PK pptx bytes")
+    fake_extract_msg = types.SimpleNamespace(Message=lambda path: types.SimpleNamespace(attachments=[att]))
+
+    with patch.object(filedrop_msg, "_convert_file") as convert_file, \
+            patch.object(filedrop_msg, "MarkItDown"), \
+            patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        # The body still goes through _convert_file; the attachment must not.
+        convert_file.return_value = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})
+
+    atts = result["attachments"]
+    assert len(atts) == 1
+    a = atts[0]
+    assert a["filename"] == "deck.pptx"
+    assert a["markdown"] == ""
+    assert os.path.isfile(a["temp_path"])
+    with open(a["temp_path"], "rb") as fh:
+        assert fh.read() == b"PK pptx bytes"
+    # _convert_file was called for the body only, never for the .pptx attachment.
+    called_paths = [call.args[0] for call in convert_file.call_args_list]
+    assert not any(p.lower().endswith(".pptx") for p in called_paths)
+
+    shutil.rmtree(os.path.dirname(a["temp_path"]), ignore_errors=True)
+
+
 def test_image_limits_defaults_and_overrides():
     assert filedrop_msg._image_limits(dict(BASE_ENV)) == (
         filedrop_msg._DEFAULT_IMAGE_MAX_BYTES,
