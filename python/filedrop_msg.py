@@ -496,7 +496,14 @@ def convert_msg(path, env):
             with open(att_path, "wb") as fh:
                 fh.write(data)
 
-            att_md = _convert_file(att_path, llm_md, env, plain_md)
+            # .pptx attachments are converted on the TypeScript side through the
+            # structured PPTX path (it reads the bytes back via temp_path), so
+            # skip markitdown here — its flat output (plus discarded per-image
+            # vision calls) would only be thrown away.
+            if filename.lower().endswith(".pptx"):
+                att_md = ""
+            else:
+                att_md = _convert_file(att_path, llm_md, env, plain_md)
             attachments.append({
                 "filename": filename,
                 "temp_path": att_path,

@@ -281,6 +281,32 @@ export default class FileDropPlugin extends Plugin {
 		return `${linked}\n\n## Unplaced images\n\n${appended}`;
 	}
 
+	// Produce the body markdown for one .msg attachment. A .pptx attachment is run
+	// through the structured PPTX path (`convertPptxNote`) so it matches a
+	// standalone drop — its pictures land in their own `<att>_pictures/` folder
+	// under the `<msg>.attachments/` dir, and the image links point there.
+	// Everything else reuses the markdown the Python helper already produced.
+	// `attDirVaultPath` is the vault path of `<msg>.attachments`; `noteRelAttDir`
+	// is that same dir relative to the note (the image-link prefix).
+	private async convertMsgAttachmentBody(
+		att: MsgAttachment,
+		attDirVaultPath: string,
+		noteRelAttDir: string,
+		gateway: LlmGateway | null,
+		onPhase: OnPhase | undefined,
+		onProgress: OnProgress | undefined,
+	): Promise<string> {
+		if (att.filename.toLowerCase().endsWith('.pptx')) {
+			const picBase = `${noteNameFromFile(att.filename)}_pictures`;
+			return this.convertPptxNote(
+				att.tempPath, gateway, onPhase, onProgress,
+				normalizePath(`${attDirVaultPath}/${picBase}`),
+				`${noteRelAttDir}/${picBase}`,
+			);
+		}
+		return att.markdown;
+	}
+
 	// Remove the temp directory holding a .msg's extracted attachments (or a
 	// .pptx's extracted pictures). All items share a single mkdtemp dir, so
 	// deleting each distinct parent once cleans everything up (best-effort;
@@ -372,9 +398,21 @@ export default class FileDropPlugin extends Plugin {
 						}
 						const attParts: string[] = [msgResult.body];
 						for (const att of msgResult.attachments) {
-							if (!att.markdown) continue;
+							const isPptxAtt = att.filename.toLowerCase().endsWith('.pptx');
+							if (!isPptxAtt && !att.markdown) continue;
+							// A .pptx attachment goes through the structured PPTX path; its
+							// pictures share the group note's pictures dir with a per-deck
+							// prefix (like a direct .pptx group member), so this works for
+							// external groups too where there is no `.attachments/` dir.
+							const attMd = isPptxAtt
+								? await this.convertPptxNote(
+									att.tempPath, gateway, onPhase, onProgress,
+									picturesDirVaultPath, picturesDirName,
+									`${rawName.replace(/\W/g, '')}__${noteNameFromFile(att.filename).replace(/\W/g, '')}__`,
+								)
+								: att.markdown;
 							if (isExternal) {
-								attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${att.markdown}`);
+								attParts.push(`---\n\n## Attachment: ${att.filename}\n\n${attMd}`);
 							} else {
 								const attPath = normalizePath(`${groupDirPath}/${attDirName}/${att.filename}`);
 								await this.writeMsgAttachment(att, attPath);
@@ -382,10 +420,10 @@ export default class FileDropPlugin extends Plugin {
 									`  - "[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}]]"`
 								);
 								const attLink = `[[${monthSlug}/${category}/${groupDirName}/${attDirName}/${att.filename}|${att.filename}]]`;
-								attParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
+								attParts.push(`---\n\n## Attachment: ${attLink}\n\n${attMd}`);
 							}
-							if (hasErrorCallout(att.markdown)) err = true;
-							else if (hasWarningCallout(att.markdown)) warn = true;
+							if (hasErrorCallout(attMd)) err = true;
+							else if (hasWarningCallout(attMd)) warn = true;
 						}
 						// The Python side writes attachment bytes to temp files for both
 						// vault and external groups, so clean them up either way.
@@ -720,8 +758,8 @@ export default class FileDropPlugin extends Plugin {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
 
 				const attDirName = `${rawName}.attachments`;
+				const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
 				if (msgResult.attachments.length > 0) {
-					const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
 					await this.ensureDir(attDirPath);
 
 					for (const att of msgResult.attachments) {
@@ -733,11 +771,14 @@ export default class FileDropPlugin extends Plugin {
 
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (!att.markdown) continue;
+					const isPptxAtt = att.filename.toLowerCase().endsWith('.pptx');
+					if (!isPptxAtt && !att.markdown) continue;
+					const attMarkdown = await this.convertMsgAttachmentBody(
+						att, attDirPath, attDirName, gateway, onPhase, onProgress);
 					const attLink = `[[${monthSlug}/${category}/${attDirName}/${att.filename}|${att.filename}]]`;
-					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
-					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
+					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${attMarkdown}`);
+					if (hasErrorCallout(attMarkdown)) attachmentHadError = true;
+					else if (hasWarningCallout(attMarkdown)) attachmentHadWarning = true;
 				}
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				markdownBody = bodyParts.join('\n\n');
@@ -909,8 +950,8 @@ export default class FileDropPlugin extends Plugin {
 				// rerun is self-healing (the dir may have been deleted). The on-disk
 				// dir is the real sibling of the .msg; the wikilink omits the
 				// incoming prefix, mirroring the initial drop.
+				const attDirPath = normalizePath(`${entry.filePath.split('/').slice(0, -1).join('/')}/${attDirName}`);
 				if (msgResult.attachments.length > 0) {
-					const attDirPath = normalizePath(`${entry.filePath.split('/').slice(0, -1).join('/')}/${attDirName}`);
 					await this.ensureDir(attDirPath);
 					for (const att of msgResult.attachments) {
 						const attFilePath = normalizePath(`${attDirPath}/${att.filename}`);
@@ -920,11 +961,14 @@ export default class FileDropPlugin extends Plugin {
 
 				const bodyParts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
-					if (!att.markdown) continue;
+					const isPptxAtt = att.filename.toLowerCase().endsWith('.pptx');
+					if (!isPptxAtt && !att.markdown) continue;
+					const attMarkdown = await this.convertMsgAttachmentBody(
+						att, attDirPath, attDirName, gateway, onPhase, onProgress);
 					const attLink = `[[${rerunMonthSlug}/${rerunCategory}/${attDirName}/${att.filename}|${att.filename}]]`;
-					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${att.markdown}`);
-					if (hasErrorCallout(att.markdown)) attachmentHadError = true;
-					else if (hasWarningCallout(att.markdown)) attachmentHadWarning = true;
+					bodyParts.push(`---\n\n## Attachment: ${attLink}\n\n${attMarkdown}`);
+					if (hasErrorCallout(attMarkdown)) attachmentHadError = true;
+					else if (hasWarningCallout(attMarkdown)) attachmentHadWarning = true;
 				}
 				await this.cleanupMsgTempFiles(msgResult.attachments);
 				newBody = bodyParts.join('\n\n');
