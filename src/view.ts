@@ -5,11 +5,13 @@ import { extFromMime, pastedBaseName } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, insertTaskIntoNote, MatchedNote } from './references';
 import { loadTemplatesFromPaths, rankTemplates } from './templates';
 import { loadRestructurePairs, rankRestructurePairs } from './restructure';
+import { parseHeaderSections, suggestHeaderMapping } from './header-restructure';
 import { rewriteNoteTags, writeNoteSummary, writeNoteSummaryAndMetadata } from './note-tools';
 import { ReferenceModal } from './reference-modal';
 import { CreateTodoModal } from './create-todo-modal';
 import { TemplateModal } from './template-modal';
 import { RestructureModal } from './restructure-modal';
+import { HeaderRestructureModal } from './header-restructure-modal';
 import type FileDropPlugin from '../main';
 
 export class FileDropView extends ItemView {
@@ -69,6 +71,7 @@ export class FileDropView extends ItemView {
 		if (this.plugin.settings.restructureTemplates.length > 0) {
 			this.createIconActionButton(this.currentNoteActionRow, 'copy-plus', 'Create a restructured note from a template', () => this.restructureCurrentNote());
 		}
+		this.createIconActionButton(this.currentNoteActionRow, 'list-tree', "Restructure this note's headers with the selected LLM", () => this.restructureHeadersForCurrentNote());
 
 		this.updateCurrentNotePanel(this.app.workspace.getActiveFile());
 		this.registerEvent(this.app.workspace.on('file-open', (file) => {
@@ -816,6 +819,43 @@ export class FileDropView extends ItemView {
 		new RestructureModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
+	private async restructureHeadersForCurrentNote(): Promise<void> {
+		const file = this.app.workspace.getActiveFile();
+		if (!(file instanceof TFile) || file.extension !== 'md') {
+			new Notice('FileDrop: no markdown note is active.');
+			return;
+		}
+
+		const content = await this.app.vault.read(file);
+		const fmEnd = content.indexOf('\n---\n');
+		const fmBlock = fmEnd >= 0 ? content.slice(0, fmEnd + 5) : '';
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+		const rawFm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		const noteFrontmatter: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(rawFm)) {
+			if (k === 'position') continue;
+			noteFrontmatter[k] = v;
+		}
+
+		const parsed = parseHeaderSections(body);
+		if (parsed.sections.length <= 1) {
+			new Notice('FileDrop: this note needs at least two headers to restructure.');
+			return;
+		}
+
+		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
+		const { mapping, usedLlm } = await suggestHeaderMapping(
+			file.basename,
+			noteFrontmatter,
+			parsed,
+			null,
+			gateway,
+			() => this.plugin.saveSettings(),
+		);
+
+		new HeaderRestructureModal(this.app, this.plugin, file, noteFrontmatter, fmBlock, parsed, mapping, usedLlm, gateway).open();
+	}
+
 	private writeNoteSummary(notePath: string, summary: string): Promise<void> {
 		return writeNoteSummary(this.app, notePath, summary);
 	}
@@ -907,7 +947,7 @@ class GroupFinishModal extends Modal {
 	}
 }
 
-function llmErrorMessage(reason: LlmOpError, detail?: string): string {
+export function llmErrorMessage(reason: LlmOpError, detail?: string): string {
 	const base: Record<LlmOpError, string> = {
 		'insecure-url': 'refusing to use an insecure gateway URL — use HTTPS or localhost',
 		'empty-content': detail ?? 'note body is empty or contains a conversion error',

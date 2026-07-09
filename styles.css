@@ -745,6 +745,43 @@
   flex: 1;
 }
 
+/* Header restructure modal */
+
+.filedrop-header-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.filedrop-header-row-old {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.filedrop-header-row-arrow {
+  color: var(--text-faint);
+}
+
+.filedrop-header-row-level {
+  width: 60px;
+  font-size: var(--font-ui-small);
+}
+
+.filedrop-header-row-text {
+  flex: 1 1 0;
+  min-width: 0;
+  font-size: var(--font-ui-small);
+}
+
+.filedrop-header-row-move {
+  padding: 0 6px;
+}
+
 /* Confirm modal */
 
 .filedrop-confirm-buttons {
