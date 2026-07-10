@@ -1,6 +1,7 @@
 import { Notice, Plugin, TFile, normalizePath } from 'obsidian';
 
 import {
+	DEFAULT_NOTE_TOOLS_API,
 	DEFAULT_SETTINGS,
 	DroppedFile,
 	FileDropSettings,
@@ -75,7 +76,7 @@ export default class FileDropPlugin extends Plugin {
 
 	async onload(): Promise<void> {
 		await this.loadSettings();
-		this.api = buildFileDropApi(new NoteTools(this.app, this));
+		this.api = buildFileDropApi(new NoteTools(this.app, this), this);
 		this.registerView(VIEW_TYPE, (leaf) => new FileDropView(leaf, this));
 		this.addRibbonIcon('inbox', 'FileDrop', () => this.activateView());
 		this.addCommand({
@@ -643,6 +644,7 @@ export default class FileDropPlugin extends Plugin {
 		const rawSettings = (data?.settings ?? {}) as Partial<FileDropSettings>;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, rawSettings);
 		this.settings.llmGateways = migrateLegacyLlmFields(rawSettings);
+		this.settings.noteToolsApi = { ...DEFAULT_NOTE_TOOLS_API, ...(rawSettings.noteToolsApi ?? {}) };
 		// Strip legacy fields so they are not re-persisted after migration
 		delete (this.settings as any).llmProvider;
 		delete (this.settings as any).llmGatewayUrl;

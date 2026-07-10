@@ -54,14 +54,38 @@ export interface ReferenceConditionGroup {
 	template: string;           // empty = use global referenceTemplate
 }
 
-// A restructure template pairs a template note (headings + per-section guidance)
-// with the main vault folder where restructured notes derived from it are filed.
-export interface RestructureTemplatePair {
+// A template pair pairs a template note (headings + per-section guidance)
+// with the main vault folder where notes derived from it are filed. Read by
+// both the createFromTemplate and fixFrontmatter note tools.
+export interface TemplatePair {
 	id: string;
 	name: string;            // user-facing label
 	templatePath: string;    // vault-relative path to the template .md
 	targetFolder: string;    // vault-relative main folder for created notes
 }
+
+// The current-note tools exposed on plugin.api (src/note-tools.ts). Toggled
+// independently of the sidebar buttons, which are unaffected either way.
+export type NoteToolName =
+	| 'summarize'
+	| 'suggestTags'
+	| 'createTodo'
+	| 'addReferences'
+	| 'fixFrontmatter'
+	| 'createFromTemplate'
+	| 'restructureNote';
+
+export type NoteToolsApiAccess = Record<NoteToolName, boolean>;
+
+export const DEFAULT_NOTE_TOOLS_API: NoteToolsApiAccess = {
+	summarize: true,
+	suggestTags: true,
+	createTodo: true,
+	addReferences: true,
+	fixFrontmatter: true,
+	createFromTemplate: true,
+	restructureNote: true,
+};
 
 export interface FileDropSettings {
 	incomingDir: string;
@@ -78,10 +102,11 @@ export interface FileDropSettings {
 	referenceGroups: ReferenceConditionGroup[];
 	referenceTemplate: string;
 	referenceMaxMatches: number;
-	restructureTemplates: RestructureTemplatePair[];  // template ↔ main-folder pairs; their templates are also used for "Fix to template"
+	templatePairs: TemplatePair[];  // template ↔ main-folder pairs; used by both createFromTemplate and fixFrontmatter
 	todoSection: string;
 	todoPrompt: string;
 	pptxBatchMaxSlides: number;
+	noteToolsApi: NoteToolsApiAccess;  // which current-note tools are exposed on plugin.api
 	// Legacy fields — read on first load for migration only
 	llmProvider?: string;
 	llmGatewayUrl?: string;
@@ -192,10 +217,11 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceGroups: [],
 	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
 	referenceMaxMatches: 5,
-	restructureTemplates: [],
+	templatePairs: [],
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
 	pptxBatchMaxSlides: 8,
+	noteToolsApi: { ...DEFAULT_NOTE_TOOLS_API },
 };
 
 export interface PreferredTag {

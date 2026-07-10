@@ -51,7 +51,7 @@ async function loadTemplateNote(app: App, file: TFile): Promise<TemplateNote> {
 }
 
 // Load the configured template notes (vault-relative paths, e.g. from the
-// restructure pairs) as TemplateNotes, reading each one's frontmatter from the
+// template pairs) as TemplateNotes, reading each one's frontmatter from the
 // metadata cache and a short body excerpt for matching context. Missing or
 // non-markdown paths are skipped; duplicate paths are loaded once.
 export async function loadTemplatesFromPaths(app: App, paths: string[]): Promise<TemplateNote[]> {

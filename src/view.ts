@@ -4,13 +4,13 @@ import { DroppedFile, LlmGateway, LlmOpError, STATUS_LABELS, VIEW_TYPE, isConver
 import { extFromMime, pastedBaseName } from './utils';
 import { findCandidateNotes, extractActivityMetadata, fillMetadataWithLLM, matchCandidatesWithLLM, insertTaskIntoNote, MatchedNote } from './references';
 import { loadTemplatesFromPaths, rankTemplates } from './templates';
-import { loadRestructurePairs, rankRestructurePairs } from './restructure';
+import { loadTemplatePairs, rankTemplatePairs } from './create-from-template';
 import { parseHeaderSections, suggestHeaderMapping } from './header-restructure';
 import { rewriteNoteTags, writeNoteSummary, writeNoteSummaryAndMetadata } from './note-tools';
 import { ReferenceModal } from './reference-modal';
 import { CreateTodoModal } from './create-todo-modal';
 import { TemplateModal } from './template-modal';
-import { RestructureModal } from './restructure-modal';
+import { CreateFromTemplateModal } from './create-from-template-modal';
 import { HeaderRestructureModal } from './header-restructure-modal';
 import type FileDropPlugin from '../main';
 
@@ -65,11 +65,11 @@ export class FileDropView extends ItemView {
 		if (this.plugin.settings.referenceGroups.length > 0) {
 			this.createIconActionButton(this.currentNoteActionRow, 'link', 'Find and add references to matching notes', () => this.addReferencesForCurrentNote());
 		}
-		if (this.plugin.settings.restructureTemplates.some((p) => p.templatePath.trim())) {
-			this.createIconActionButton(this.currentNoteActionRow, 'layout-template', 'Fix frontmatter to the matching template', () => this.fixCurrentNoteToTemplate());
+		if (this.plugin.settings.templatePairs.some((p) => p.templatePath.trim())) {
+			this.createIconActionButton(this.currentNoteActionRow, 'layout-template', 'Fix frontmatter to the matching template', () => this.fixCurrentNoteFrontmatter());
 		}
-		if (this.plugin.settings.restructureTemplates.length > 0) {
-			this.createIconActionButton(this.currentNoteActionRow, 'copy-plus', 'Create a restructured note from a template', () => this.restructureCurrentNote());
+		if (this.plugin.settings.templatePairs.length > 0) {
+			this.createIconActionButton(this.currentNoteActionRow, 'copy-plus', 'Create a new note from a template', () => this.createFromTemplateForCurrentNote());
 		}
 		this.createIconActionButton(this.currentNoteActionRow, 'list-tree', "Restructure this note's headers with the selected LLM", () => this.restructureHeadersForCurrentNote());
 
@@ -744,18 +744,18 @@ export class FileDropView extends ItemView {
 		return section.join('\n').trim().slice(0, 3000);
 	}
 
-	private async fixCurrentNoteToTemplate(): Promise<void> {
+	private async fixCurrentNoteFrontmatter(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!(file instanceof TFile) || file.extension !== 'md') {
 			new Notice('FileDrop: no markdown note is active.');
 			return;
 		}
 
-		const paths = this.plugin.settings.restructureTemplates.map((p) => p.templatePath);
+		const paths = this.plugin.settings.templatePairs.map((p) => p.templatePath);
 		const templates = (await loadTemplatesFromPaths(this.app, paths))
 			.filter((t) => t.file.path !== file.path); // never match a note to itself
 		if (templates.length === 0) {
-			new Notice('FileDrop: no configured templates found. Add one under Restructure templates in settings.');
+			new Notice('FileDrop: no configured templates found. Add one under Template pairs in settings.');
 			return;
 		}
 
@@ -782,17 +782,17 @@ export class FileDropView extends ItemView {
 		new TemplateModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
-	private async restructureCurrentNote(): Promise<void> {
+	private async createFromTemplateForCurrentNote(): Promise<void> {
 		const file = this.app.workspace.getActiveFile();
 		if (!(file instanceof TFile) || file.extension !== 'md') {
 			new Notice('FileDrop: no markdown note is active.');
 			return;
 		}
 
-		const pairs = (await loadRestructurePairs(this.app, this.plugin.settings.restructureTemplates))
-			.filter((p) => p.template.file.path !== file.path); // never restructure a note from itself
+		const pairs = (await loadTemplatePairs(this.app, this.plugin.settings.templatePairs))
+			.filter((p) => p.template.file.path !== file.path); // never draft a note from itself
 		if (pairs.length === 0) {
-			new Notice('FileDrop: no usable restructure templates are configured.');
+			new Notice('FileDrop: no usable template pairs are configured.');
 			return;
 		}
 
@@ -807,7 +807,7 @@ export class FileDropView extends ItemView {
 		}
 
 		const gateway = this.plugin.settings.llmGateways.find((g) => g.id === this.selectedGatewayId) ?? null;
-		const { ranked, usedLlm } = await rankRestructurePairs(
+		const { ranked, usedLlm } = await rankTemplatePairs(
 			file.basename,
 			noteFrontmatter,
 			body,
@@ -816,7 +816,7 @@ export class FileDropView extends ItemView {
 			() => this.plugin.saveSettings(),
 		);
 
-		new RestructureModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
+		new CreateFromTemplateModal(this.app, this.plugin, file, noteFrontmatter, body, ranked, usedLlm, gateway).open();
 	}
 
 	private async restructureHeadersForCurrentNote(): Promise<void> {

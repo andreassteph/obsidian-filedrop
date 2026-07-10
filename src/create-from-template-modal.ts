@@ -2,21 +2,21 @@ import { App, Modal, Notice, TFile, normalizePath } from 'obsidian';
 
 import { LlmGateway } from './settings';
 import {
-	RestructurePair,
+	CreateFromTemplatePair,
 	existingSubfolders,
 	factCheckNoteBody,
-	restructureNoteBody,
+	draftNoteFromTemplate,
 	suggestSubfolder,
-} from './restructure';
+} from './create-from-template';
 import { applyTemplateFrontmatter, fillTemplateFrontmatter } from './templates';
 import { dedupeName } from './utils';
 import type FileDropPlugin from '../main';
 
-// Confirms which restructure pair and target subfolder to use, then creates a
-// NEW note: the source note restructured into the chosen template's headings
+// Confirms which template pair and target subfolder to use, then creates a
+// NEW note: the source note drafted into the chosen template's headings
 // (per-section guidance, source-only content), fact-checked, with template
 // frontmatter filled and a back-link to the original.
-export class RestructureModal extends Modal {
+export class CreateFromTemplateModal extends Modal {
 	private selectedIndex = 0;
 	private subfolderInput: HTMLInputElement | null = null;
 	private subfolderStatus: HTMLElement | null = null;
@@ -28,7 +28,7 @@ export class RestructureModal extends Modal {
 		private readonly noteFile: TFile,
 		private readonly noteFrontmatter: Record<string, unknown>,
 		private readonly noteBody: string,
-		private readonly ranked: RestructurePair[],
+		private readonly ranked: CreateFromTemplatePair[],
 		private readonly usedLlm: boolean,
 		private readonly gateway: LlmGateway | null,
 	) {
@@ -37,10 +37,10 @@ export class RestructureModal extends Modal {
 
 	onOpen(): void {
 		const { contentEl } = this;
-		contentEl.createEl('h2', { text: `Restructure into new note — ${this.noteFile.basename}` });
+		contentEl.createEl('h2', { text: `Create note from template — ${this.noteFile.basename}` });
 
 		if (this.ranked.length === 0) {
-			contentEl.createEl('p', { text: 'No restructure templates are configured.' });
+			contentEl.createEl('p', { text: 'No template pairs are configured.' });
 			const row = contentEl.createDiv({ cls: 'filedrop-ref-modal-buttons' });
 			row.createEl('button', { text: 'Close' }).addEventListener('click', () => this.close());
 			return;
@@ -49,13 +49,13 @@ export class RestructureModal extends Modal {
 		contentEl.createEl('p', {
 			text: this.usedLlm
 				? 'The selected template was matched by the LLM. Confirm or pick another:'
-				: 'Select the template to restructure into:',
+				: 'Select the template to create the note from:',
 			cls: 'filedrop-ref-modal-hint',
 		});
 
 		const list = contentEl.createDiv({ cls: 'filedrop-ref-modal-list' });
 		const radios: HTMLInputElement[] = [];
-		const groupName = `filedrop-restructure-${this.noteFile.path}`;
+		const groupName = `filedrop-create-from-template-${this.noteFile.path}`;
 
 		this.ranked.forEach((pair, i) => {
 			const item = list.createDiv({ cls: 'filedrop-ref-modal-item' });
@@ -101,11 +101,11 @@ export class RestructureModal extends Modal {
 			createBtn.disabled = true;
 			createBtn.textContent = 'Working…';
 			try {
-				await this.createRestructuredNote(this.ranked[this.selectedIndex], titleInput.value.trim());
+				await this.createNoteFromTemplate(this.ranked[this.selectedIndex], titleInput.value.trim());
 				this.close();
 			} catch (e) {
-				console.error('FileDrop: failed to create restructured note', e);
-				new Notice('FileDrop: failed to create restructured note (see console).');
+				console.error('FileDrop: failed to create note from template', e);
+				new Notice('FileDrop: failed to create note from template (see console).');
 				createBtn.disabled = false;
 				createBtn.textContent = 'Create note';
 			}
@@ -153,15 +153,15 @@ export class RestructureModal extends Modal {
 		}
 	}
 
-	private async createRestructuredNote(pair: RestructurePair, title: string): Promise<void> {
+	private async createNoteFromTemplate(pair: CreateFromTemplatePair, title: string): Promise<void> {
 		if (this.suggesting) {
 			new Notice('FileDrop: still suggesting a subfolder — try again in a moment.');
 			throw new Error('subfolder suggestion in progress');
 		}
 		const persist = () => this.plugin.saveSettings();
 
-		// 1. Restructure body, then fact-check it against the source.
-		const drafted = await restructureNoteBody(
+		// 1. Draft the note body, then fact-check it against the source.
+		const drafted = await draftNoteFromTemplate(
 			pair,
 			this.noteFile.basename,
 			this.noteFrontmatter,
@@ -170,8 +170,8 @@ export class RestructureModal extends Modal {
 			persist,
 		);
 		if (!drafted.ok) {
-			new Notice('FileDrop: could not restructure the note (see console).');
-			throw new Error(`restructure failed: ${drafted.reason}`);
+			new Notice('FileDrop: could not draft the note (see console).');
+			throw new Error(`draft failed: ${drafted.reason}`);
 		}
 		const body = await factCheckNoteBody(this.noteBody, drafted.value, this.gateway, persist);
 

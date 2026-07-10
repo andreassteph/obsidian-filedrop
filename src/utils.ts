@@ -1,3 +1,18 @@
+import { App, normalizePath } from 'obsidian';
+
+// Create every path segment of a vault-relative folder path that doesn't yet
+// exist. Mirrors CreateFromTemplateModal's private ensureFolder/main.ts's ensureDir.
+export async function ensureFolder(app: App, path: string): Promise<void> {
+	const parts = normalizePath(path).split('/').filter(Boolean);
+	let cur = '';
+	for (const part of parts) {
+		cur = cur ? `${cur}/${part}` : part;
+		if (!(await app.vault.adapter.exists(cur))) {
+			await app.vault.adapter.mkdir(cur);
+		}
+	}
+}
+
 // Run `fn` over `items` with at most `limit` calls in flight at once, returning
 // the results in input order regardless of completion order. The returned array
 // is keyed by the original index, so callers get stable ordering for free.
