@@ -63,6 +63,27 @@ export interface RestructureTemplatePair {
 	targetFolder: string;    // vault-relative main folder for created notes
 }
 
+// The current-note tools exposed on plugin.api (src/note-tools.ts). Toggled
+// independently of the sidebar buttons, which are unaffected either way.
+export type NoteToolName =
+	| 'summarize'
+	| 'suggestTags'
+	| 'createTodo'
+	| 'addReferences'
+	| 'fixToTemplate'
+	| 'restructure';
+
+export type NoteToolsApiAccess = Record<NoteToolName, boolean>;
+
+export const DEFAULT_NOTE_TOOLS_API: NoteToolsApiAccess = {
+	summarize: true,
+	suggestTags: true,
+	createTodo: true,
+	addReferences: true,
+	fixToTemplate: true,
+	restructure: true,
+};
+
 export interface FileDropSettings {
 	incomingDir: string;
 	externalFolder: string;          // absolute OS path, '' = disabled
@@ -82,6 +103,7 @@ export interface FileDropSettings {
 	todoSection: string;
 	todoPrompt: string;
 	pptxBatchMaxSlides: number;
+	noteToolsApi: NoteToolsApiAccess;  // which current-note tools are exposed on plugin.api
 	// Legacy fields — read on first load for migration only
 	llmProvider?: string;
 	llmGatewayUrl?: string;
@@ -196,6 +218,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
 	pptxBatchMaxSlides: 8,
+	noteToolsApi: { ...DEFAULT_NOTE_TOOLS_API },
 };
 
 export interface PreferredTag {

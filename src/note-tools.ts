@@ -1,16 +1,39 @@
-import { App, TFile } from 'obsidian';
+import { App, TFile, normalizePath } from 'obsidian';
 
 import {
 	LlmGateway,
 	LlmOpError,
+	NoteToolName,
 	isGatewayEnabled,
 	parsePreferredTags,
 	reviseSummary,
 	suggestTags,
 	summarizeContent,
 } from './settings';
-import { ActivityMetadata, extractActivityMetadata, fillMetadataWithLLM } from './references';
-import { replaceTagsBlock } from './utils';
+import {
+	ActivityMetadata,
+	MatchedNote,
+	extractActivityMetadata,
+	fillMetadataWithLLM,
+	findCandidateNotes,
+	generateTodoTask,
+	insertReferenceIntoNote,
+	insertTaskIntoNote,
+	matchCandidatesWithLLM,
+	normalizeTaskLine,
+	renderReferenceBlock,
+} from './references';
+import { TemplateNote, applyTemplateFrontmatter, fillTemplateFrontmatter, loadTemplatesFromPaths, rankTemplates } from './templates';
+import {
+	RestructurePair,
+	existingSubfolders,
+	factCheckNoteBody,
+	loadRestructurePairs,
+	rankRestructurePairs,
+	restructureNoteBody,
+	suggestSubfolder,
+} from './restructure';
+import { dedupeName, ensureFolder, replaceTagsBlock } from './utils';
 import type FileDropPlugin from '../main';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +50,9 @@ export type NoteToolError =
 	| 'note-not-found'
 	| 'note-ambiguous'
 	| 'not-markdown'
-	| 'no-gateway';
+	| 'no-gateway'
+	| 'no-template'
+	| 'tool-disabled';
 
 export type NoteToolResult<T> =
 	| ({ ok: true } & T)
@@ -57,6 +82,44 @@ export interface SuggestTagsOptions extends BaseNoteOptions {
 	merge?: boolean;
 }
 
+export interface CreateTodoOptions extends BaseNoteOptions {
+	/** Plain-English follow-up request, or (when raw is true) the literal task text/line. */
+	intent: string;
+	/** Note the task line is written into. Defaults to the same note as `note`. */
+	targetNote?: string;
+	/** Section heading the task is filed under. Defaults to settings.todoSection. */
+	section?: string;
+	/** Skip the LLM: normalize `intent` directly into a task line (no gateway required). */
+	raw?: boolean;
+}
+
+export interface AddReferencesOptions extends BaseNoteOptions {
+	/** Cap on LLM-matched notes (default settings.referenceMaxMatches). Ignored when `targets` is given. */
+	maxMatches?: number;
+	/** Explicit target note path(s)/basename(s) to reference into, bypassing LLM matching entirely. */
+	targets?: string[];
+	/** Reference-block template. Used (with `section`) only when `targets` is given. */
+	template?: string;
+	/** Section header for explicit targets. Used only when `targets` is given. */
+	section?: string;
+	/** Optional follow-up todo intent; generated and written into the first referenced note. */
+	todo?: string;
+}
+
+export interface FixToTemplateOptions extends BaseNoteOptions {
+	/** Template vault path or basename among the configured restructure templates. Omit to auto-rank. */
+	template?: string;
+}
+
+export interface RestructureOptions extends BaseNoteOptions {
+	/** RestructureTemplatePair id or name. Omit to auto-rank. */
+	pair?: string;
+	/** New note's title/basename. Defaults to the source note's basename. */
+	title?: string;
+	/** Destination subfolder under the pair's targetFolder ('' = folder root). Omit to let the LLM suggest one. */
+	subfolder?: string;
+}
+
 /** The public API object exposed on the plugin instance. */
 export interface FileDropApi {
 	summarize(
@@ -65,6 +128,18 @@ export interface FileDropApi {
 	suggestTags(
 		options?: SuggestTagsOptions,
 	): Promise<NoteToolResult<{ tags: string[]; added: string[] }>>;
+	createTodo(
+		options: CreateTodoOptions,
+	): Promise<NoteToolResult<{ task: string; targetNote: string }>>;
+	addReferences(
+		options?: AddReferencesOptions,
+	): Promise<NoteToolResult<{ referencedNotes: string[]; matched: boolean; todo?: string }>>;
+	fixToTemplate(
+		options?: FixToTemplateOptions,
+	): Promise<NoteToolResult<{ template: string; filled: Record<string, unknown>; added?: string[] }>>;
+	restructure(
+		options?: RestructureOptions,
+	): Promise<NoteToolResult<{ notePath: string; template: string; subfolder: string; subfolderIsNew: boolean; body?: string }>>;
 }
 
 type NoteResolution = { ok: true; file: TFile } | { ok: false; reason: NoteToolError; detail?: string };
@@ -125,6 +200,16 @@ export class NoteTools {
 	private readBody(content: string): string {
 		const i = content.indexOf('\n---\n');
 		return i >= 0 ? content.slice(i + 5) : content;
+	}
+
+	// Strip Obsidian's internal `position` key the metadata cache sometimes attaches.
+	private cleanFrontmatter(fm: Record<string, unknown>): Record<string, unknown> {
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(fm)) {
+			if (k === 'position') continue;
+			out[k] = v;
+		}
+		return out;
 	}
 
 	async summarize(
@@ -203,13 +288,317 @@ export class NoteTools {
 		if (!options.preview) await rewriteNoteTags(this.app, file.path, tags);
 		return { ok: true, tags, added };
 	}
+
+	async createTodo(
+		options: CreateTodoOptions,
+	): Promise<NoteToolResult<{ task: string; targetNote: string }>> {
+		const noteRes = this.resolveNote(options.note);
+		if (!noteRes.ok) return noteRes;
+		const contextFile = noteRes.file;
+
+		let targetFile = contextFile;
+		if (options.targetNote && options.targetNote.trim().length > 0) {
+			const targetRes = this.resolveNote(options.targetNote);
+			if (!targetRes.ok) return targetRes;
+			targetFile = targetRes.file;
+		}
+
+		const content = await this.app.vault.read(contextFile);
+		const rawFm = this.app.metadataCache.getFileCache(contextFile)?.frontmatter ?? {};
+		const summary: string = typeof rawFm.summary === 'string' ? rawFm.summary : '';
+		const date: string | null = rawFm.file_date ? String(rawFm.file_date) : null;
+		const noteContent = content.slice(0, 6000);
+
+		let task: string;
+		if (options.raw) {
+			task = normalizeTaskLine(options.intent);
+			if (!task) return { ok: false, reason: 'no-reply', detail: 'empty task line' };
+		} else {
+			const gateway = this.resolveGateway(options.gateway);
+			if (!gateway || !isGatewayEnabled(gateway)) return { ok: false, reason: 'no-gateway' };
+			const today = new Date().toISOString().slice(0, 10);
+			const result = await generateTodoTask(
+				options.intent,
+				{ title: contextFile.basename, summary, date, noteContent },
+				gateway,
+				today,
+				this.plugin.settings.todoPrompt,
+				this.persist,
+			);
+			if (!result.ok) return result;
+			task = result.value;
+		}
+
+		if (!options.preview) {
+			await writeTaskToNote(this.app, targetFile.path, task, options.section ?? this.plugin.settings.todoSection);
+		}
+		return { ok: true, task, targetNote: targetFile.path };
+	}
+
+	async addReferences(
+		options: AddReferencesOptions = {},
+	): Promise<NoteToolResult<{ referencedNotes: string[]; matched: boolean; todo?: string }>> {
+		const noteRes = this.resolveNote(options.note);
+		if (!noteRes.ok) return noteRes;
+		const file = noteRes.file;
+
+		const gateway = this.resolveGateway(options.gateway);
+		const gatewayActive = !!gateway && isGatewayEnabled(gateway);
+
+		const content = await this.app.vault.read(file);
+		const body = this.readBody(content);
+		const rawFm = this.app.metadataCache.getFileCache(file)?.frontmatter ?? {};
+		const existingSummary: string = typeof rawFm.summary === 'string' ? rawFm.summary : '';
+
+		let metadata: ActivityMetadata;
+		const hasCachedDate = 'file_date' in rawFm && rawFm.file_date;
+		const hasCachedType = 'file_type' in rawFm && rawFm.file_type;
+		const hasCachedPeople = 'file_people' in rawFm && rawFm.file_people;
+		if (hasCachedDate && hasCachedType && hasCachedPeople) {
+			metadata = {
+				date: String(rawFm.file_date),
+				type: String(rawFm.file_type),
+				people: Array.isArray(rawFm.file_people) ? rawFm.file_people.map(String) : null,
+			};
+		} else {
+			metadata = extractActivityMetadata(body, file.path, file.stat);
+			const hasNullMetadata = metadata.date === null || metadata.type === null || metadata.people === null;
+			if (gatewayActive && hasNullMetadata) {
+				const fillResult = await fillMetadataWithLLM(metadata, body, gateway!, this.persist);
+				if (fillResult.ok) metadata = fillResult.value;
+			}
+		}
+
+		let summary = existingSummary;
+		if (gatewayActive && !existingSummary) {
+			const summaryResult = await summarizeContent(body, gateway!, undefined, this.persist);
+			if (summaryResult.ok) {
+				summary = summaryResult.value;
+				if (!options.preview) await writeNoteSummary(this.app, file.path, summary);
+			}
+		}
+
+		const noteFrontmatter: Record<string, unknown> = { ...rawFm };
+		if (summary) noteFrontmatter.summary = summary;
+
+		type ReferenceTarget = { file: TFile; template: string; section: string };
+		let targets: ReferenceTarget[] = [];
+		let matched = false;
+
+		if (options.targets && options.targets.length > 0) {
+			for (const t of options.targets) {
+				const res = this.resolveNote(t);
+				if (!res.ok) return res;
+				targets.push({
+					file: res.file,
+					template: options.template ?? this.plugin.settings.referenceTemplate,
+					section: options.section ?? this.plugin.settings.referenceGroups[0]?.targetSection ?? '# References',
+				});
+			}
+		} else {
+			if (!gatewayActive) return { ok: false, reason: 'no-gateway' };
+			const groupCandidates = findCandidateNotes(this.app, this.plugin.settings.referenceGroups);
+			const matchResult = await matchCandidatesWithLLM(
+				body,
+				noteFrontmatter,
+				groupCandidates,
+				gateway!,
+				options.maxMatches ?? this.plugin.settings.referenceMaxMatches,
+				this.persist,
+			);
+			if (!matchResult.ok) return matchResult;
+			matched = true;
+			targets = matchResult.value.map((m: MatchedNote) => ({
+				file: m.candidate.file,
+				template: m.group.template || this.plugin.settings.referenceTemplate,
+				section: m.group.targetSection,
+			}));
+		}
+
+		const vars = {
+			date: metadata.date ?? '',
+			type: metadata.type ?? '',
+			summary,
+			title: file.basename,
+			people: (metadata.people ?? []).join(', '),
+			note_link: `[[${file.path.replace(/\.md$/, '')}]]`,
+		};
+
+		const referencedNotes: string[] = [];
+		for (const target of targets) {
+			const block = renderReferenceBlock(target.template, vars);
+			if (!options.preview) {
+				const current = await this.app.vault.read(target.file);
+				const updated = insertReferenceIntoNote(current, block, target.section);
+				await this.app.vault.modify(target.file, updated);
+			}
+			referencedNotes.push(target.file.path);
+		}
+
+		let todo: string | undefined;
+		if (options.todo && gatewayActive && referencedNotes.length > 0) {
+			const today = new Date().toISOString().slice(0, 10);
+			const todoResult = await generateTodoTask(
+				options.todo,
+				{ title: file.basename, summary, date: metadata.date, noteContent: content.slice(0, 6000) },
+				gateway!,
+				today,
+				this.plugin.settings.todoPrompt,
+				this.persist,
+			);
+			if (todoResult.ok) {
+				todo = todoResult.value;
+				if (!options.preview) {
+					await writeTaskToNote(this.app, targets[0].file.path, todo, this.plugin.settings.todoSection);
+				}
+			}
+		}
+
+		return todo !== undefined
+			? { ok: true, referencedNotes, matched, todo }
+			: { ok: true, referencedNotes, matched };
+	}
+
+	async fixToTemplate(
+		options: FixToTemplateOptions = {},
+	): Promise<NoteToolResult<{ template: string; filled: Record<string, unknown>; added?: string[] }>> {
+		const noteRes = this.resolveNote(options.note);
+		if (!noteRes.ok) return noteRes;
+		const file = noteRes.file;
+		const gateway = this.resolveGateway(options.gateway);
+
+		const paths = this.plugin.settings.restructureTemplates.map((p) => p.templatePath);
+		const templates = (await loadTemplatesFromPaths(this.app, paths)).filter((t) => t.file.path !== file.path);
+		if (templates.length === 0) {
+			return { ok: false, reason: 'no-template', detail: 'no restructure templates configured' };
+		}
+
+		const content = await this.app.vault.read(file);
+		const body = this.readBody(content);
+		const noteFrontmatter = this.cleanFrontmatter(this.app.metadataCache.getFileCache(file)?.frontmatter ?? {});
+
+		let selected: TemplateNote;
+		if (options.template && options.template.trim().length > 0) {
+			const wanted = options.template.trim();
+			const byPath = templates.filter((t) => t.file.path === wanted);
+			const matches = byPath.length > 0 ? byPath : templates.filter((t) => t.name.toLowerCase() === wanted.toLowerCase());
+			if (matches.length !== 1) {
+				return { ok: false, reason: 'no-template', detail: `template "${wanted}" ${matches.length === 0 ? 'not found' : 'ambiguous'}` };
+			}
+			selected = matches[0];
+		} else {
+			const { ranked } = await rankTemplates(file.basename, noteFrontmatter, body, templates, gateway, this.persist);
+			selected = ranked[0];
+		}
+
+		const fill = await fillTemplateFrontmatter(selected, file.basename, noteFrontmatter, body, gateway, this.persist);
+		if (!fill.ok) return fill;
+
+		if (options.preview) {
+			return { ok: true, template: selected.name, filled: fill.value };
+		}
+		const added = await applyTemplateFrontmatter(this.app, file, selected, fill.value);
+		return { ok: true, template: selected.name, filled: fill.value, added };
+	}
+
+	async restructure(
+		options: RestructureOptions = {},
+	): Promise<NoteToolResult<{ notePath: string; template: string; subfolder: string; subfolderIsNew: boolean; body?: string }>> {
+		const noteRes = this.resolveNote(options.note);
+		if (!noteRes.ok) return noteRes;
+		const file = noteRes.file;
+		const gateway = this.resolveGateway(options.gateway);
+
+		const pairs = (await loadRestructurePairs(this.app, this.plugin.settings.restructureTemplates))
+			.filter((p) => p.template.file.path !== file.path);
+		if (pairs.length === 0) {
+			return { ok: false, reason: 'no-template', detail: 'no usable restructure templates configured' };
+		}
+
+		const content = await this.app.vault.read(file);
+		const body = this.readBody(content);
+		const noteFrontmatter = this.cleanFrontmatter(this.app.metadataCache.getFileCache(file)?.frontmatter ?? {});
+
+		let pair: RestructurePair;
+		if (options.pair && options.pair.trim().length > 0) {
+			const wanted = options.pair.trim();
+			const byId = pairs.filter((p) => p.config.id === wanted);
+			const byName = byId.length > 0 ? byId : pairs.filter((p) => p.config.name.toLowerCase() === wanted.toLowerCase());
+			const matches = byName.length > 0 ? byName : pairs.filter((p) => p.template.name.toLowerCase() === wanted.toLowerCase());
+			if (matches.length !== 1) {
+				return { ok: false, reason: 'no-template', detail: `restructure pair "${wanted}" ${matches.length === 0 ? 'not found' : 'ambiguous'}` };
+			}
+			pair = matches[0];
+		} else {
+			const { ranked } = await rankRestructurePairs(file.basename, noteFrontmatter, body, pairs, gateway, this.persist);
+			pair = ranked[0];
+		}
+
+		const drafted = await restructureNoteBody(pair, file.basename, noteFrontmatter, body, gateway, this.persist);
+		if (!drafted.ok) return drafted;
+		const finalBody = await factCheckNoteBody(body, drafted.value, gateway, this.persist);
+
+		let subfolder: string;
+		let subfolderIsNew: boolean;
+		if (options.subfolder !== undefined) {
+			subfolder = options.subfolder.trim().replace(/^\/+|\/+$/g, '');
+			subfolderIsNew = false;
+		} else {
+			const existing = existingSubfolders(this.app, pair.config.targetFolder);
+			const suggestion = await suggestSubfolder(file.basename, noteFrontmatter, body, existing, gateway, this.persist);
+			subfolder = suggestion.ok ? suggestion.value.subfolder : '';
+			subfolderIsNew = suggestion.ok ? suggestion.value.isNew : false;
+		}
+
+		const baseFolder = pair.config.targetFolder.replace(/\/+$/, '').trim();
+		const destFolder = normalizePath(subfolder ? `${baseFolder}/${subfolder}` : baseFolder);
+
+		const safeTitle = (options.title || file.basename).replace(/[\\/:*?"<>|]+/g, '-').trim() || 'note';
+		let fileName = `${safeTitle}.md`;
+		let attempt = 1;
+		while (this.app.vault.getAbstractFileByPath(normalizePath(`${destFolder}/${fileName}`))) {
+			fileName = dedupeName(`${safeTitle}.md`, ++attempt);
+		}
+		const notePath = normalizePath(`${destFolder}/${fileName}`);
+
+		// The one tool that defaults to preview mode, since it creates a
+		// brand-new file as a side effect — only options.preview === false applies it.
+		if (options.preview !== false) {
+			return { ok: true, notePath, template: pair.template.name, subfolder, subfolderIsNew, body: finalBody };
+		}
+
+		await ensureFolder(this.app, destFolder);
+		const newFile = await this.app.vault.create(notePath, finalBody.trim() ? `\n${finalBody.trim()}\n` : '\n');
+		const fill = await fillTemplateFrontmatter(pair.template, file.basename, noteFrontmatter, body, gateway, this.persist);
+		await applyTemplateFrontmatter(this.app, newFile, pair.template, fill.ok ? fill.value : {});
+		await this.app.fileManager.processFrontMatter(newFile, (fm: Record<string, unknown>) => {
+			fm.source = `[[${file.basename}]]`;
+		});
+
+		return { ok: true, notePath: newFile.path, template: pair.template.name, subfolder, subfolderIsNew };
+	}
 }
 
-/** Build the public, serializable API object bound to a NoteTools instance. */
-export function buildFileDropApi(tools: NoteTools): FileDropApi {
+/**
+ * Build the public, serializable API object bound to a NoteTools instance.
+ * Toggles are read live off plugin.settings.noteToolsApi on every call, so
+ * flipping a setting takes effect immediately without a plugin reload. Every
+ * method always exists on the returned object — a disabled tool resolves to
+ * { ok: false, reason: 'tool-disabled' } rather than being omitted, so a
+ * caller never hits "not a function".
+ */
+export function buildFileDropApi(tools: NoteTools, plugin: FileDropPlugin): FileDropApi {
+	const disabled = (name: NoteToolName): Promise<{ ok: false; reason: 'tool-disabled'; detail: string }> =>
+		Promise.resolve({ ok: false, reason: 'tool-disabled', detail: name });
+	const enabled = (name: NoteToolName) => plugin.settings.noteToolsApi[name] !== false;
+
 	return {
-		summarize: (options) => tools.summarize(options),
-		suggestTags: (options) => tools.suggestTags(options),
+		summarize: (options) => (enabled('summarize') ? tools.summarize(options) : disabled('summarize')),
+		suggestTags: (options) => (enabled('suggestTags') ? tools.suggestTags(options) : disabled('suggestTags')),
+		createTodo: (options) => (enabled('createTodo') ? tools.createTodo(options) : disabled('createTodo')),
+		addReferences: (options) => (enabled('addReferences') ? tools.addReferences(options) : disabled('addReferences')),
+		fixToTemplate: (options) => (enabled('fixToTemplate') ? tools.fixToTemplate(options) : disabled('fixToTemplate')),
+		restructure: (options) => (enabled('restructure') ? tools.restructure(options) : disabled('restructure')),
 	};
 }
 
@@ -283,4 +672,11 @@ export async function rewriteNoteTags(app: App, notePath: string, tags: string[]
 	const content = await app.vault.read(file);
 	const updated = replaceTagsBlock(content, tags);
 	await app.vault.modify(file, updated);
+}
+
+export async function writeTaskToNote(app: App, notePath: string, taskLine: string, sectionHeader: string): Promise<void> {
+	const file = app.vault.getAbstractFileByPath(notePath);
+	if (!(file instanceof TFile)) return;
+	const content = await app.vault.read(file);
+	await app.vault.modify(file, insertTaskIntoNote(content, taskLine, sectionHeader));
 }

@@ -5,6 +5,7 @@ import {
 	LlmGateway,
 	LLM_PROVIDERS,
 	ModelCapabilities,
+	NoteToolName,
 	ReferenceConditionGroup,
 	RestructureTemplatePair,
 	fetchModelsForGateway,
@@ -403,6 +404,34 @@ export class FileDropSettingTab extends PluginSettingTab {
 					this.display();
 				})
 			);
+
+		new Setting(containerEl).setName('Note tools API access').setHeading();
+		new Setting(containerEl).setDesc(
+			'Controls which current-note tools are exposed on the in-process API ' +
+			'(app.plugins.plugins["obsidian-filedrop"].api) used by Templater / QuickAdd / dataviewjs scripts. ' +
+			'This does not affect the sidebar buttons — only api.<tool>() calls. ' +
+			'A disabled tool still exists on the API object but resolves to { ok: false, reason: "tool-disabled" }.'
+		);
+
+		const NOTE_TOOL_LABELS: Record<NoteToolName, string> = {
+			summarize: 'Summarize',
+			suggestTags: 'Suggest tags',
+			createTodo: 'Create todo',
+			addReferences: 'Add references',
+			fixToTemplate: 'Fix to template',
+			restructure: 'Restructure (creates a new note)',
+		};
+
+		(Object.keys(NOTE_TOOL_LABELS) as NoteToolName[]).forEach((tool) => {
+			new Setting(containerEl)
+				.setName(NOTE_TOOL_LABELS[tool])
+				.addToggle((toggle) =>
+					toggle.setValue(this.plugin.settings.noteToolsApi[tool]).onChange(async (value) => {
+						this.plugin.settings.noteToolsApi[tool] = value;
+						await this.plugin.saveSettings();
+					})
+				);
+		});
 
 		// Auto-populate models for gateways with credentials but no cached models yet
 		this.plugin.settings.llmGateways.forEach((gw) => {

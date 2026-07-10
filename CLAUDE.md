@@ -28,9 +28,9 @@ vision/OCR LLM calls embedded in it.
 - `src/restructure-modal.ts` — `RestructureModal`, the UI that confirms the matched pair, suggests/edits the target subfolder (re-suggested when the pair changes), then creates the restructured + fact-checked note (with a `source` back-link to the original) and opens it.
 - `src/header-restructure.ts` — **header-reorg engine (self-restructure, in place).** Independent of `restructure.ts`'s template pairs — reorganizes a note's own headers rather than fitting it to an external template. `parseHeaderSections()` splits a note body into a flat, fenced-code-aware list of `HeaderSection` (level + text + untouched `bodyLines`) plus any preamble before the first header; `suggestHeaderMapping()` asks the LLM for a strict 1:1 reorder/relevel/rename of those headers (never merge/split/drop — content is never touched by the LLM, only relocated) and silently falls back to the identity mapping when no gateway is available or the call fails; `reviseHeaderMapping()` is the explicit-result variant used by the modal's Revise button, re-running the suggestion with a user instruction; `reassembleHeaderBody()` is the pure, deterministic function that reorders/rewrites header lines per a validated mapping while moving each section's body byte-for-byte.
 - `src/header-restructure-modal.ts` — `HeaderRestructureModal`, the UI that shows the proposed old→new header mapping (level/text, reorderable via ↑/↓), lets the user edit it inline or type an instruction and click Revise to re-ask the LLM, then applies it by rewriting the current note in place.
-- `src/settings-tab.ts` — settings UI panel (LLM gateway config, model dropdown, "Check" probe, reference groups, restructure-template pairs).
+- `src/settings-tab.ts` — settings UI panel (LLM gateway config, model dropdown, "Check" probe, reference groups, restructure-template pairs, and the "Note tools API access" per-tool toggles).
 - `src/view.ts` — sidebar drop-zone UI and per-file/per-note actions ("Add summary", "Suggest tags", "Add references", "Fix to template", "Create restructured note", "Restructure headers"). Orchestrates the reference flow: extract metadata → `fillMetadataWithLLM` → `summarizeContent` → `matchCandidatesWithLLM` → open `ReferenceModal`; the template flow: `loadTemplatesFromPaths` → `rankTemplates` → open `TemplateModal` (→ `fillTemplateFrontmatter` → `applyTemplateFrontmatter`); the restructure flow: `loadRestructurePairs` → `rankRestructurePairs` → open `RestructureModal` (→ `suggestSubfolder` → `restructureNoteBody` → `factCheckNoteBody` → create note); and the header-restructure flow: `parseHeaderSections` → `suggestHeaderMapping` → open `HeaderRestructureModal` (→ `reviseHeaderMapping` → `reassembleHeaderBody` → rewrite the note in place).
-- `src/note-tools.ts` — **headless current-note tools + in-process API.** `NoteTools(app, plugin)` exposes the per-note actions without any UI (no `Notice`/`Modal`): each method takes a typed options object — `note` (path/basename, **defaults to the active note**), `gateway` (id/name), `preview` — and returns a serializable `{ ok, … } | { ok: false, reason, detail }`, reusing the same LLM helpers the view does. `resolveNote()`/`resolveGateway()` map the params to a `TFile`/gateway. `buildFileDropApi()` builds the `FileDropApi` object assigned to `plugin.api` in `main.ts` (reachable at `app.plugins.plugins["obsidian-filedrop"].api`, QuickAdd-style — see `## API`). Also home to the shared frontmatter writers `writeNoteSummary()`/`writeNoteSummaryAndMetadata()`/`rewriteNoteTags()` (lifted out of `view.ts`, which now delegates to them — one write path for both sidebar and API).
+- `src/note-tools.ts` — **headless current-note tools + in-process API.** `NoteTools(app, plugin)` exposes the per-note actions without any UI (no `Notice`/`Modal`): each method takes a typed options object — `note` (path/basename, **defaults to the active note**), `gateway` (id/name), `preview` — and returns a serializable `{ ok, … } | { ok: false, reason, detail }`, reusing the same LLM helpers the view does. `resolveNote()`/`resolveGateway()` map the params to a `TFile`/gateway. `buildFileDropApi()` builds the `FileDropApi` object assigned to `plugin.api` in `main.ts` (reachable at `app.plugins.plugins["obsidian-filedrop"].api`, QuickAdd-style — see `## API`). Also home to the shared frontmatter/task writers `writeNoteSummary()`/`writeNoteSummaryAndMetadata()`/`rewriteNoteTags()`/`writeTaskToNote()` (lifted out of `view.ts`, which now delegates to them — one write path for both sidebar and API).
 - `src/utils.ts` — shared helpers.
 
 ### Python (`python/`)
@@ -107,23 +107,31 @@ app.plugins.plugins["obsidian-filedrop"].api
 Every method takes one options object and returns `{ ok, … } | { ok: false, reason, detail }`.
 Common options: `note` (path/basename, **defaults to the active note**), `gateway`
 (id/name; defaults to the sidebar's selected gateway, then the first enabled one),
-and `preview` (when `true`, return the result without writing it — default is apply).
-`reason` is an `LlmOpError` or one of `note-not-found` / `note-ambiguous` /
-`not-markdown` / `no-gateway`.
+and `preview` (when `true`, return the result without writing it — default is apply,
+**except `restructure`, which defaults `preview` to `true`** since it creates a
+brand-new file as a side effect). `reason` is an `LlmOpError` or one of
+`note-not-found` / `note-ambiguous` / `not-markdown` / `no-gateway` /
+`no-template` (no restructure templates configured, or a `template`/`pair` id
+wasn't found or was ambiguous) / `tool-disabled` (see below).
 
-The tools are rolled out in phases. **Currently only Phase 1 is implemented:**
+All six tools are implemented:
 
-- **Phase 1 — implemented:**
-  - `summarize({ instruction?, includeMetadata? })` — fresh summary (+ `file_date`/`file_type`/`file_people` metadata when `includeMetadata`, default true), or revise the existing summary when `instruction` is given.
-  - `suggestTags({ maxTags?, merge? })` — suggest tags and write `tags` (union with existing by default; `merge: false` replaces).
-- **Phase 2 — not yet implemented:** `createTodo({ intent, targetNote?, section?, raw? })`, `addReferences({ maxMatches?, targets?, todo? })`, `fixToTemplate({ template? })`.
-- **Phase 3 — not yet implemented:** `restructure({ pair?, title, subfolder? })` (creates a new note).
+- `summarize({ instruction?, includeMetadata? })` — fresh summary (+ `file_date`/`file_type`/`file_people` metadata when `includeMetadata`, default true), or revise the existing summary when `instruction` is given.
+- `suggestTags({ maxTags?, merge? })` — suggest tags and write `tags` (union with existing by default; `merge: false` replaces).
+- `createTodo({ intent, targetNote?, section?, raw? })` — generate (or, with `raw: true`, literally normalize) a Tasks line and file it under `section` (default `settings.todoSection`) in `targetNote` (default: the same note supplying context).
+- `addReferences({ maxMatches?, targets?, template?, section?, todo? })` — LLM-match reference-group candidates (or, with `targets`, reference those notes directly) and insert a reference block into each; optionally also files a follow-up todo into the first referenced note.
+- `fixToTemplate({ template? })` — rank (or, with `template`, force) a configured template and fill/apply its frontmatter fields.
+- `restructure({ pair?, title?, subfolder? })` — rank (or, with `pair`, force) a template↔folder pair, restructure + fact-check the note into a new file under `subfolder` (LLM-suggested if omitted), and fill its frontmatter. `preview` defaults to `true` here.
 
-When building Phase 2/3, reuse the existing LLM helpers (in `references.ts` /
-`templates.ts` / `restructure.ts`) and route any note writes through the shared
-writers in `note-tools.ts` — each former modal choice becomes an explicit
-parameter (e.g. `intent`, `template`, `title`, `targets`). Full per-tool
-parameter spec: the plan at `we-are-now-creating-lexical-umbrella.md`.
+The `*Options` interfaces in `src/note-tools.ts` are the source of truth for
+each tool's full parameter list and semantics.
+
+Each tool's exposure on the API can be toggled independently in Settings →
+"Note tools API access" (`settings.noteToolsApi`, a `NoteToolName → boolean`
+map, all enabled by default) — this only affects `plugin.api`, not the
+sidebar buttons. `buildFileDropApi()` reads the toggle live on every call; a
+disabled tool resolves to `{ ok: false, reason: 'tool-disabled' }` rather than
+being removed from the API object.
 
 ## Dev
 
