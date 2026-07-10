@@ -7,7 +7,7 @@ import {
 	ModelCapabilities,
 	NoteToolName,
 	ReferenceConditionGroup,
-	RestructureTemplatePair,
+	TemplatePair,
 	fetchModelsForGateway,
 	gatewayUrlIssue,
 	getCapabilities,
@@ -295,24 +295,24 @@ export class FileDropSettingTab extends PluginSettingTab {
 				});
 			});
 
-		// Restructure templates
-		new Setting(containerEl).setName('Restructure templates').setHeading();
+		// Template pairs
+		new Setting(containerEl).setName('Template pairs').setHeading();
 		new Setting(containerEl).setDesc(
-			'Template ↔ main-folder pairs, used by both the "Fix to template" and "Create a restructured note" actions in the current-note panel. ' +
-			'Each pair binds a template note (headings with per-section guidance lines) to the folder where restructured notes are filed — ' +
-			'"Fix to template" only uses the template note, ignoring the target folder. ' +
+			'Template ↔ main-folder pairs, used by both the "Fix frontmatter" and "Create note from template" actions in the current-note panel. ' +
+			'Each pair binds a template note (headings with per-section guidance lines) to the folder where created notes are filed — ' +
+			'"Fix frontmatter" only uses the template note, ignoring the target folder. ' +
 			'The LLM suggests which pair fits the current note and which subfolder to use.',
 		);
 
-		this.plugin.settings.restructureTemplates.forEach((pair, idx) => {
-			this.renderRestructurePair(containerEl, pair, idx);
+		this.plugin.settings.templatePairs.forEach((pair, idx) => {
+			this.renderTemplatePair(containerEl, pair, idx);
 		});
 
 		new Setting(containerEl)
-			.setName('Add restructure pair')
+			.setName('Add template pair')
 			.addButton((btn) =>
 				btn.setButtonText('+ Add pair').onClick(async () => {
-					this.plugin.settings.restructureTemplates.push({
+					this.plugin.settings.templatePairs.push({
 						id: crypto.randomUUID(),
 						name: 'New pair',
 						templatePath: '',
@@ -418,8 +418,9 @@ export class FileDropSettingTab extends PluginSettingTab {
 			suggestTags: 'Suggest tags',
 			createTodo: 'Create todo',
 			addReferences: 'Add references',
-			fixToTemplate: 'Fix to template',
-			restructure: 'Restructure (creates a new note)',
+			fixFrontmatter: 'Fix frontmatter',
+			createFromTemplate: 'Create note from template',
+			restructureNote: 'Restructure headers (in place)',
 		};
 
 		(Object.keys(NOTE_TOOL_LABELS) as NoteToolName[]).forEach((tool) => {
@@ -636,7 +637,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 		return `Detected: ${parts.join(' · ')}${when}`;
 	}
 
-	private renderRestructurePair(containerEl: HTMLElement, pair: RestructureTemplatePair, idx: number): void {
+	private renderTemplatePair(containerEl: HTMLElement, pair: TemplatePair, idx: number): void {
 		const wrapperEl = containerEl.createDiv({ cls: 'filedrop-gateway-entry' });
 
 		new Setting(wrapperEl)
@@ -646,7 +647,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 					.setPlaceholder('Pair name, e.g. Meeting → Meetings')
 					.setValue(pair.name)
 					.onChange(async (value) => {
-						this.plugin.settings.restructureTemplates[idx].name = value.trim();
+						this.plugin.settings.templatePairs[idx].name = value.trim();
 						await this.plugin.saveSettings();
 					}),
 			)
@@ -655,7 +656,7 @@ export class FileDropSettingTab extends PluginSettingTab {
 					.setIcon('trash')
 					.setTooltip('Remove pair')
 					.onClick(async () => {
-						this.plugin.settings.restructureTemplates.splice(idx, 1);
+						this.plugin.settings.templatePairs.splice(idx, 1);
 						await this.plugin.saveSettings();
 						this.display();
 					}),
@@ -669,30 +670,30 @@ export class FileDropSettingTab extends PluginSettingTab {
 					.setPlaceholder('e.g. Templates/Meeting.md')
 					.setValue(pair.templatePath)
 					.onChange(async (value) => {
-						this.plugin.settings.restructureTemplates[idx].templatePath = value.trim();
+						this.plugin.settings.templatePairs[idx].templatePath = value.trim();
 						await this.plugin.saveSettings();
 					});
 				new FileSuggest(this.app, text.inputEl, async (file) => {
 					text.setValue(file.path);
-					this.plugin.settings.restructureTemplates[idx].templatePath = file.path;
+					this.plugin.settings.templatePairs[idx].templatePath = file.path;
 					await this.plugin.saveSettings();
 				});
 			});
 
 		new Setting(wrapperEl)
 			.setName('Target folder')
-			.setDesc('Vault-relative main folder where restructured notes are filed (a subfolder is suggested per note).')
+			.setDesc('Vault-relative main folder where created notes are filed (a subfolder is suggested per note).')
 			.addText((text) => {
 				text
 					.setPlaceholder('e.g. Meetings')
 					.setValue(pair.targetFolder)
 					.onChange(async (value) => {
-						this.plugin.settings.restructureTemplates[idx].targetFolder = value.trim();
+						this.plugin.settings.templatePairs[idx].targetFolder = value.trim();
 						await this.plugin.saveSettings();
 					});
 				new FolderSuggest(this.app, text.inputEl, async (folder) => {
 					text.setValue(folder.path);
-					this.plugin.settings.restructureTemplates[idx].targetFolder = folder.path;
+					this.plugin.settings.templatePairs[idx].targetFolder = folder.path;
 					await this.plugin.saveSettings();
 				});
 			});

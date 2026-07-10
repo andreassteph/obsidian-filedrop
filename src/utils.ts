@@ -1,7 +1,7 @@
 import { App, normalizePath } from 'obsidian';
 
 // Create every path segment of a vault-relative folder path that doesn't yet
-// exist. Mirrors RestructureModal's private ensureFolder/main.ts's ensureDir.
+// exist. Mirrors CreateFromTemplateModal's private ensureFolder/main.ts's ensureDir.
 export async function ensureFolder(app: App, path: string): Promise<void> {
 	const parts = normalizePath(path).split('/').filter(Boolean);
 	let cur = '';

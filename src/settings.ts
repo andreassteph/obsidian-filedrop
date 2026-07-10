@@ -54,9 +54,10 @@ export interface ReferenceConditionGroup {
 	template: string;           // empty = use global referenceTemplate
 }
 
-// A restructure template pairs a template note (headings + per-section guidance)
-// with the main vault folder where restructured notes derived from it are filed.
-export interface RestructureTemplatePair {
+// A template pair pairs a template note (headings + per-section guidance)
+// with the main vault folder where notes derived from it are filed. Read by
+// both the createFromTemplate and fixFrontmatter note tools.
+export interface TemplatePair {
 	id: string;
 	name: string;            // user-facing label
 	templatePath: string;    // vault-relative path to the template .md
@@ -70,8 +71,9 @@ export type NoteToolName =
 	| 'suggestTags'
 	| 'createTodo'
 	| 'addReferences'
-	| 'fixToTemplate'
-	| 'restructure';
+	| 'fixFrontmatter'
+	| 'createFromTemplate'
+	| 'restructureNote';
 
 export type NoteToolsApiAccess = Record<NoteToolName, boolean>;
 
@@ -80,8 +82,9 @@ export const DEFAULT_NOTE_TOOLS_API: NoteToolsApiAccess = {
 	suggestTags: true,
 	createTodo: true,
 	addReferences: true,
-	fixToTemplate: true,
-	restructure: true,
+	fixFrontmatter: true,
+	createFromTemplate: true,
+	restructureNote: true,
 };
 
 export interface FileDropSettings {
@@ -99,7 +102,7 @@ export interface FileDropSettings {
 	referenceGroups: ReferenceConditionGroup[];
 	referenceTemplate: string;
 	referenceMaxMatches: number;
-	restructureTemplates: RestructureTemplatePair[];  // template ↔ main-folder pairs; their templates are also used for "Fix to template"
+	templatePairs: TemplatePair[];  // template ↔ main-folder pairs; used by both createFromTemplate and fixFrontmatter
 	todoSection: string;
 	todoPrompt: string;
 	pptxBatchMaxSlides: number;
@@ -214,7 +217,7 @@ export const DEFAULT_SETTINGS: FileDropSettings = {
 	referenceGroups: [],
 	referenceTemplate: '{{date}} {{type}}: {{title}}\n{{summary}}\n\nPeople: {{people}}\n\nSource: {{note_link}}',
 	referenceMaxMatches: 5,
-	restructureTemplates: [],
+	templatePairs: [],
 	todoSection: '## Tasks',
 	todoPrompt: DEFAULT_TODO_PROMPT,
 	pptxBatchMaxSlides: 8,

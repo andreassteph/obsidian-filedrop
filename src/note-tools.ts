@@ -25,14 +25,21 @@ import {
 } from './references';
 import { TemplateNote, applyTemplateFrontmatter, fillTemplateFrontmatter, loadTemplatesFromPaths, rankTemplates } from './templates';
 import {
-	RestructurePair,
+	CreateFromTemplatePair,
 	existingSubfolders,
 	factCheckNoteBody,
-	loadRestructurePairs,
-	rankRestructurePairs,
-	restructureNoteBody,
+	loadTemplatePairs,
+	rankTemplatePairs,
+	draftNoteFromTemplate,
 	suggestSubfolder,
-} from './restructure';
+} from './create-from-template';
+import {
+	HeaderMappingEntry,
+	parseHeaderSections,
+	reassembleHeaderBody,
+	reviseHeaderMapping,
+	suggestHeaderMapping,
+} from './header-restructure';
 import { dedupeName, ensureFolder, replaceTagsBlock } from './utils';
 import type FileDropPlugin from '../main';
 
@@ -52,6 +59,7 @@ export type NoteToolError =
 	| 'not-markdown'
 	| 'no-gateway'
 	| 'no-template'
+	| 'no-headers'
 	| 'tool-disabled';
 
 export type NoteToolResult<T> =
@@ -106,18 +114,25 @@ export interface AddReferencesOptions extends BaseNoteOptions {
 	todo?: string;
 }
 
-export interface FixToTemplateOptions extends BaseNoteOptions {
-	/** Template vault path or basename among the configured restructure templates. Omit to auto-rank. */
+export interface FixFrontmatterOptions extends BaseNoteOptions {
+	/** Template vault path or basename among the configured template pairs. Omit to auto-rank. */
 	template?: string;
 }
 
-export interface RestructureOptions extends BaseNoteOptions {
-	/** RestructureTemplatePair id or name. Omit to auto-rank. */
+export interface CreateFromTemplateOptions extends BaseNoteOptions {
+	/** TemplatePair id or name. Omit to auto-rank. */
 	pair?: string;
 	/** New note's title/basename. Defaults to the source note's basename. */
 	title?: string;
 	/** Destination subfolder under the pair's targetFolder ('' = folder root). Omit to let the LLM suggest one. */
 	subfolder?: string;
+}
+
+export interface RestructureNoteOptions extends BaseNoteOptions {
+	/** Guidance for the LLM's proposed header mapping. */
+	instruction?: string;
+	/** Explicit mapping to apply. Given alone, applied as-is with no LLM call; given with `instruction`, revised by the LLM (requires a gateway). */
+	mapping?: HeaderMappingEntry[];
 }
 
 /** The public API object exposed on the plugin instance. */
@@ -134,12 +149,15 @@ export interface FileDropApi {
 	addReferences(
 		options?: AddReferencesOptions,
 	): Promise<NoteToolResult<{ referencedNotes: string[]; matched: boolean; todo?: string }>>;
-	fixToTemplate(
-		options?: FixToTemplateOptions,
+	fixFrontmatter(
+		options?: FixFrontmatterOptions,
 	): Promise<NoteToolResult<{ template: string; filled: Record<string, unknown>; added?: string[] }>>;
-	restructure(
-		options?: RestructureOptions,
+	createFromTemplate(
+		options?: CreateFromTemplateOptions,
 	): Promise<NoteToolResult<{ notePath: string; template: string; subfolder: string; subfolderIsNew: boolean; body?: string }>>;
+	restructureNote(
+		options?: RestructureNoteOptions,
+	): Promise<NoteToolResult<{ mapping: HeaderMappingEntry[]; usedLlm: boolean }>>;
 }
 
 type NoteResolution = { ok: true; file: TFile } | { ok: false; reason: NoteToolError; detail?: string };
@@ -459,18 +477,18 @@ export class NoteTools {
 			: { ok: true, referencedNotes, matched };
 	}
 
-	async fixToTemplate(
-		options: FixToTemplateOptions = {},
+	async fixFrontmatter(
+		options: FixFrontmatterOptions = {},
 	): Promise<NoteToolResult<{ template: string; filled: Record<string, unknown>; added?: string[] }>> {
 		const noteRes = this.resolveNote(options.note);
 		if (!noteRes.ok) return noteRes;
 		const file = noteRes.file;
 		const gateway = this.resolveGateway(options.gateway);
 
-		const paths = this.plugin.settings.restructureTemplates.map((p) => p.templatePath);
+		const paths = this.plugin.settings.templatePairs.map((p) => p.templatePath);
 		const templates = (await loadTemplatesFromPaths(this.app, paths)).filter((t) => t.file.path !== file.path);
 		if (templates.length === 0) {
-			return { ok: false, reason: 'no-template', detail: 'no restructure templates configured' };
+			return { ok: false, reason: 'no-template', detail: 'no template pairs configured' };
 		}
 
 		const content = await this.app.vault.read(file);
@@ -501,40 +519,40 @@ export class NoteTools {
 		return { ok: true, template: selected.name, filled: fill.value, added };
 	}
 
-	async restructure(
-		options: RestructureOptions = {},
+	async createFromTemplate(
+		options: CreateFromTemplateOptions = {},
 	): Promise<NoteToolResult<{ notePath: string; template: string; subfolder: string; subfolderIsNew: boolean; body?: string }>> {
 		const noteRes = this.resolveNote(options.note);
 		if (!noteRes.ok) return noteRes;
 		const file = noteRes.file;
 		const gateway = this.resolveGateway(options.gateway);
 
-		const pairs = (await loadRestructurePairs(this.app, this.plugin.settings.restructureTemplates))
+		const pairs = (await loadTemplatePairs(this.app, this.plugin.settings.templatePairs))
 			.filter((p) => p.template.file.path !== file.path);
 		if (pairs.length === 0) {
-			return { ok: false, reason: 'no-template', detail: 'no usable restructure templates configured' };
+			return { ok: false, reason: 'no-template', detail: 'no usable template pairs configured' };
 		}
 
 		const content = await this.app.vault.read(file);
 		const body = this.readBody(content);
 		const noteFrontmatter = this.cleanFrontmatter(this.app.metadataCache.getFileCache(file)?.frontmatter ?? {});
 
-		let pair: RestructurePair;
+		let pair: CreateFromTemplatePair;
 		if (options.pair && options.pair.trim().length > 0) {
 			const wanted = options.pair.trim();
 			const byId = pairs.filter((p) => p.config.id === wanted);
 			const byName = byId.length > 0 ? byId : pairs.filter((p) => p.config.name.toLowerCase() === wanted.toLowerCase());
 			const matches = byName.length > 0 ? byName : pairs.filter((p) => p.template.name.toLowerCase() === wanted.toLowerCase());
 			if (matches.length !== 1) {
-				return { ok: false, reason: 'no-template', detail: `restructure pair "${wanted}" ${matches.length === 0 ? 'not found' : 'ambiguous'}` };
+				return { ok: false, reason: 'no-template', detail: `template pair "${wanted}" ${matches.length === 0 ? 'not found' : 'ambiguous'}` };
 			}
 			pair = matches[0];
 		} else {
-			const { ranked } = await rankRestructurePairs(file.basename, noteFrontmatter, body, pairs, gateway, this.persist);
+			const { ranked } = await rankTemplatePairs(file.basename, noteFrontmatter, body, pairs, gateway, this.persist);
 			pair = ranked[0];
 		}
 
-		const drafted = await restructureNoteBody(pair, file.basename, noteFrontmatter, body, gateway, this.persist);
+		const drafted = await draftNoteFromTemplate(pair, file.basename, noteFrontmatter, body, gateway, this.persist);
 		if (!drafted.ok) return drafted;
 		const finalBody = await factCheckNoteBody(body, drafted.value, gateway, this.persist);
 
@@ -577,6 +595,60 @@ export class NoteTools {
 
 		return { ok: true, notePath: newFile.path, template: pair.template.name, subfolder, subfolderIsNew };
 	}
+
+	async restructureNote(
+		options: RestructureNoteOptions = {},
+	): Promise<NoteToolResult<{ mapping: HeaderMappingEntry[]; usedLlm: boolean }>> {
+		const noteRes = this.resolveNote(options.note);
+		if (!noteRes.ok) return noteRes;
+		const file = noteRes.file;
+		const gateway = this.resolveGateway(options.gateway);
+
+		// Keep the RAW frontmatter block (not cleanFrontmatter's parsed object) —
+		// the write path re-prepends it verbatim, exactly like
+		// HeaderRestructureModal's Apply button.
+		const content = await this.app.vault.read(file);
+		const fmEnd = content.indexOf('\n---\n');
+		const fmBlock = fmEnd >= 0 ? content.slice(0, fmEnd + 5) : '';
+		const body = fmEnd >= 0 ? content.slice(fmEnd + 5) : content;
+		const noteFrontmatter = this.cleanFrontmatter(this.app.metadataCache.getFileCache(file)?.frontmatter ?? {});
+
+		const parsed = parseHeaderSections(body);
+		if (parsed.sections.length <= 1) {
+			return { ok: false, reason: 'no-headers', detail: 'note needs at least two headers to restructure' };
+		}
+
+		const hasMapping = options.mapping !== undefined;
+		const instruction = options.instruction?.trim() || null;
+
+		let mapping: HeaderMappingEntry[];
+		let usedLlm: boolean;
+		if (hasMapping && instruction) {
+			// Explicit mapping + instruction -> LLM revise; hard-requires a
+			// gateway, propagate its LlmResult failure as-is.
+			const revised = await reviseHeaderMapping(file.basename, noteFrontmatter, parsed, options.mapping!, instruction, gateway, this.persist);
+			if (!revised.ok) return revised;
+			mapping = revised.value;
+			usedLlm = true;
+		} else if (hasMapping) {
+			// Explicit mapping, no instruction -> apply as-is, no LLM call.
+			mapping = options.mapping!;
+			usedLlm = false;
+		} else {
+			// No mapping (instruction optional) -> suggest; gateway optional,
+			// suggestHeaderMapping degrades to the identity mapping without one.
+			const suggestion = await suggestHeaderMapping(file.basename, noteFrontmatter, parsed, instruction, gateway, this.persist);
+			mapping = suggestion.mapping;
+			usedLlm = suggestion.usedLlm;
+		}
+
+		// Defaults to preview:true (like createFromTemplate) — only preview===false applies it.
+		if (options.preview !== false) return { ok: true, mapping, usedLlm };
+
+		const newBody = reassembleHeaderBody(parsed, mapping);
+		await this.app.vault.modify(file, fmBlock + newBody);
+		return { ok: true, mapping, usedLlm };
+	}
 }
 
 /**
@@ -597,8 +669,9 @@ export function buildFileDropApi(tools: NoteTools, plugin: FileDropPlugin): File
 		suggestTags: (options) => (enabled('suggestTags') ? tools.suggestTags(options) : disabled('suggestTags')),
 		createTodo: (options) => (enabled('createTodo') ? tools.createTodo(options) : disabled('createTodo')),
 		addReferences: (options) => (enabled('addReferences') ? tools.addReferences(options) : disabled('addReferences')),
-		fixToTemplate: (options) => (enabled('fixToTemplate') ? tools.fixToTemplate(options) : disabled('fixToTemplate')),
-		restructure: (options) => (enabled('restructure') ? tools.restructure(options) : disabled('restructure')),
+		fixFrontmatter: (options) => (enabled('fixFrontmatter') ? tools.fixFrontmatter(options) : disabled('fixFrontmatter')),
+		createFromTemplate: (options) => (enabled('createFromTemplate') ? tools.createFromTemplate(options) : disabled('createFromTemplate')),
+		restructureNote: (options) => (enabled('restructureNote') ? tools.restructureNote(options) : disabled('restructureNote')),
 	};
 }
 
