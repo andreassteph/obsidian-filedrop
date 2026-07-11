@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.6.4 — Expose all current-note API tools with per-tool toggles
+
+### Changes
+
+- Add header-restructure tool for reorganizing a note's own headers in place
+- Expose all seven current-note API tools via plugin.api with per-tool access toggles in Settings
+- Document complete API reference and all tools in README
+
 ## 0.6.3 — Fix PPTX attachments in .msg and harden todo generation
 
 ### Changes
