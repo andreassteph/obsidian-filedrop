@@ -4,6 +4,7 @@ each piece via markitdown.  Outputs a single JSON object to stdout:
 
   {
     "body":        "<markitdown output of the .msg itself>",
+    "date":        "<ISO-8601 mail date, or null>",
     "attachments": [
       { "filename": "doc.pdf", "temp_path": "/tmp/.../doc.pdf", "markdown": "..." },
       ...
@@ -24,6 +25,7 @@ purpose and kept in sync with that file.
 """
 
 import base64
+import datetime
 import json
 import os
 import re
@@ -458,7 +460,7 @@ def convert_msg(path, env):
     if not os.path.isfile(path):
         kind = "a directory" if os.path.isdir(path) else "missing"
         print(f"[filedrop] input path is {kind}, not a regular file: {path}", file=sys.stderr)
-        return {"body": "", "attachments": [], "warning": None}
+        return {"body": "", "date": None, "attachments": [], "warning": None}
 
     llm_md = _build_llm_markitdown(env)
     # One no-LLM MarkItDown reused for the body and every attachment that needs
@@ -476,10 +478,29 @@ def convert_msg(path, env):
             "extract-msg is not installed — attachment extraction skipped. "
             "Run: pip install extract-msg"
         )
-        return {"body": body, "attachments": attachments, "warning": warning}
+        return {"body": body, "date": None, "attachments": attachments, "warning": warning}
 
+    mail_date = None
     try:
         msg = extract_msg.Message(path)
+    except Exception as exc:
+        warning = f"Attachment extraction failed: {type(exc).__name__}: {exc}"
+        if warning:
+            body = f"{body}\n\n{_warning_callout(warning)}" if body else _warning_callout(warning)
+        return {"body": body, "date": mail_date, "attachments": attachments, "warning": warning}
+
+    # Independent of the attachment try/except below so a date-parsing hiccup
+    # never loses attachments, and vice versa.
+    try:
+        raw_date = getattr(msg, "date", None)
+        if isinstance(raw_date, datetime.datetime):
+            mail_date = raw_date.isoformat()
+        elif raw_date:
+            mail_date = str(raw_date)
+    except Exception:
+        pass
+
+    try:
         # mkdtemp (not TemporaryDirectory) so the extracted files survive process
         # exit: the TS side reads each temp_path into the vault, then deletes it.
         tmpdir = tempfile.mkdtemp(prefix="filedrop_msg_")
@@ -517,7 +538,7 @@ def convert_msg(path, env):
     if warning:
         body = f"{body}\n\n{_warning_callout(warning)}" if body else _warning_callout(warning)
 
-    return {"body": body, "attachments": attachments, "warning": warning}
+    return {"body": body, "date": mail_date, "attachments": attachments, "warning": warning}
 
 
 def main(argv=None, env=None):

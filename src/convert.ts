@@ -475,6 +475,9 @@ export interface MsgAttachment {
 
 export interface MsgConversionResult {
 	body: string;
+	// ISO-8601 date the mail was sent/received, or null when extract-msg is
+	// unavailable or the .msg has no parseable date.
+	date: string | null;
 	attachments: MsgAttachment[];
 }
 
@@ -519,6 +522,7 @@ export async function runMsgConversion(
 						new Notice('FileDrop: file type not supported by markitdown.');
 						resolve({
 							body: conversionErrorBody('Unsupported file format', unsupported),
+							date: null,
 							attachments: [],
 						});
 						return;
@@ -526,6 +530,7 @@ export async function runMsgConversion(
 					new Notice('FileDrop: MSG extraction failed — see note body for details.');
 					resolve({
 						body: conversionErrorBody('MSG extraction failed', subprocessErrorDetail(error, stderr, stdout, timeout)),
+						date: null,
 						attachments: [],
 					});
 					return;
@@ -537,6 +542,7 @@ export async function runMsgConversion(
 						: 'MSG conversion exited successfully but produced no output.';
 					resolve({
 						body: conversionErrorBody('MSG conversion produced no output', detail),
+						date: null,
 						attachments: [],
 					});
 					return;
@@ -544,6 +550,7 @@ export async function runMsgConversion(
 				try {
 					const parsed = JSON.parse(stdout) as {
 						body: string;
+						date?: string | null;
 						attachments: Array<{ filename: string; temp_path: string; markdown: string }>;
 						warning?: string | null;
 					};
@@ -552,6 +559,7 @@ export async function runMsgConversion(
 					}
 					resolve({
 						body: parsed.body ?? '',
+						date: parsed.date ?? null,
 						attachments: (parsed.attachments ?? []).map((a) => ({
 							filename: a.filename,
 							tempPath: a.temp_path,
@@ -564,6 +572,7 @@ export async function runMsgConversion(
 							'MSG parse error',
 							`Could not parse MSG conversion output as JSON: ${e instanceof Error ? e.message : String(e)}`,
 						),
+						date: null,
 						attachments: [],
 					});
 				}

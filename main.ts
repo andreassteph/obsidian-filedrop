@@ -20,7 +20,7 @@ import {
 	suggestTags,
 } from './src/settings';
 import { ConvertPhase, MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename } from './src/utils';
+import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename, upsertFrontmatterField } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 import { FileDropApi, NoteTools, buildFileDropApi } from './src/note-tools';
@@ -354,7 +354,7 @@ export default class FileDropPlugin extends Plugin {
 		picturesDirName: string,
 		isExternal = false,
 		onProgress?: OnProgress,
-	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean }> {
+	): Promise<{ bodyParts: string[]; attachmentFrontmatterLines: string[]; anyError: boolean; anyWarning: boolean; latestMailDate: string | null }> {
 		const { vault } = this.app;
 		const basePath: string | undefined = (vault.adapter as any).basePath;
 
@@ -368,6 +368,7 @@ export default class FileDropPlugin extends Plugin {
 			attachmentFrontmatterLines: string[];
 			anyError: boolean;
 			anyWarning: boolean;
+			date: string | null;
 		};
 
 		const results = await mapWithConcurrency<typeof members[number], MemberResult>(
@@ -381,11 +382,13 @@ export default class FileDropPlugin extends Plugin {
 				const attLines: string[] = [];
 				let err = false;
 				let warn = false;
+				let date: string | null = null;
 
 				let markdown: string;
 				try {
 					if (isMsgFile) {
 						const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+						date = msgResult.date;
 						// Keep each .msg's attachments in their own `<file.msg>.attachments/`
 						// subfolder rather than flat in the group dir. Because
 						// vault.adapter.list() is non-recursive, this keeps them out of
@@ -453,6 +456,7 @@ export default class FileDropPlugin extends Plugin {
 					attachmentFrontmatterLines: attLines,
 					anyError: err,
 					anyWarning: warn,
+					date,
 				};
 			},
 		);
@@ -461,8 +465,16 @@ export default class FileDropPlugin extends Plugin {
 		const attachmentFrontmatterLines = results.flatMap((r) => r.attachmentFrontmatterLines);
 		const anyError = results.some((r) => r.anyError);
 		const anyWarning = results.some((r) => r.anyWarning);
+		// "Last mail received" across the group's .msg members. Compare via Date
+		// parsing (not string comparison) since a member's date can fall back to
+		// extract-msg's raw non-ISO string when it wasn't a datetime object.
+		const latestMailDate = results.reduce<string | null>((latest, r) => {
+			if (!r.date || isNaN(Date.parse(r.date))) return latest;
+			if (!latest || Date.parse(r.date) > Date.parse(latest)) return r.date;
+			return latest;
+		}, null);
 
-		return { bodyParts, attachmentFrontmatterLines, anyError, anyWarning };
+		return { bodyParts, attachmentFrontmatterLines, anyError, anyWarning, latestMailDate };
 	}
 
 	private async processFileGroup(
@@ -618,6 +630,7 @@ export default class FileDropPlugin extends Plugin {
 				'processed: false',
 				'verified: false',
 				`tags: ${JSON.stringify(mergedTags)}`,
+				...(converted.latestMailDate ? [`mail-date: ${JSON.stringify(converted.latestMailDate)}`] : []),
 				'attachments:',
 				...attachmentFrontmatterLines,
 				'---',
@@ -755,9 +768,11 @@ export default class FileDropPlugin extends Plugin {
 			const attachmentFrontmatterLines: string[] = [];
 			let attachmentHadError = false;
 			let attachmentHadWarning = false;
+			let mailDate: string | null = null;
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+				mailDate = msgResult.date;
 
 				const attDirName = `${rawName}.attachments`;
 				const attDirPath = normalizePath(`${subfolderPath}/${attDirName}`);
@@ -835,6 +850,7 @@ export default class FileDropPlugin extends Plugin {
 				'verified: false',
 				`tags: ${JSON.stringify(mergedTags)}`,
 			];
+			if (mailDate) frontmatterLines.push(`mail-date: ${JSON.stringify(mailDate)}`);
 			if (attachmentFrontmatterLines.length > 0) {
 				frontmatterLines.push('attachments:');
 				frontmatterLines.push(...attachmentFrontmatterLines);
@@ -915,6 +931,7 @@ export default class FileDropPlugin extends Plugin {
 			let newBody: string;
 			let attachmentHadError = false;
 			let attachmentHadWarning = false;
+			let mailDate: string | null = null;
 
 			if (isGroup) {
 				// filePath is `<incomingDir>/<month>/<category>/<groupDirName>`.
@@ -935,8 +952,10 @@ export default class FileDropPlugin extends Plugin {
 				newBody = converted.bodyParts.join('\n\n---\n\n');
 				attachmentHadError = converted.anyError;
 				attachmentHadWarning = converted.anyWarning;
+				mailDate = converted.latestMailDate;
 			} else if (isMsgFile) {
 				const msgResult = await runMsgConversion(absolutePath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+				mailDate = msgResult.date;
 				// Match the initial-drop layout: attachments live next to the .msg
 				// in `<file.msg>.attachments/` (full name, extension included). The
 				// note's frontmatter `attachments:` list already points there.
@@ -1010,7 +1029,10 @@ export default class FileDropPlugin extends Plugin {
 
 			const tagResult = await suggestTags(newBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
-			const frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
+			let frontmatter = replaceTagsBlock(content.slice(0, closingIdx + 5), mergedTags);
+			if (isGroup || isMsgFile) {
+				frontmatter = upsertFrontmatterField(frontmatter, 'mail-date', mailDate);
+			}
 
 			await vault.modify(noteFile, frontmatter + '\n' + newBody);
 
@@ -1123,7 +1145,7 @@ export default class FileDropPlugin extends Plugin {
 	// Build frontmatter for an external note. The raw file lives outside the
 	// vault, so `original-file` is a clickable file:// link rather than a vault
 	// wikilink, and `external`/`source-path` mark the entry for re-scans.
-	private buildExternalFrontmatter(displayName: string, absPath: string, tags: string[]): string {
+	private buildExternalFrontmatter(displayName: string, absPath: string, tags: string[], mailDate: string | null = null): string {
 		return [
 			'---',
 			`original-file: "[${displayName}](${externalFileUrl(absPath)})"`,
@@ -1132,6 +1154,7 @@ export default class FileDropPlugin extends Plugin {
 			'processed: false',
 			'verified: false',
 			`tags: ${JSON.stringify(tags)}`,
+			...(mailDate ? [`mail-date: ${JSON.stringify(mailDate)}`] : []),
 			'---',
 		].join('\n');
 	}
@@ -1145,6 +1168,7 @@ export default class FileDropPlugin extends Plugin {
 		sourcePath: string,
 		tags: string[],
 		body: string,
+		mailDate: string | null = null,
 	): Promise<boolean> {
 		const { vault } = this.app;
 		const existing = vault.getAbstractFileByPath(notePath);
@@ -1152,12 +1176,12 @@ export default class FileDropPlugin extends Plugin {
 			const content = await vault.read(existing);
 			const closingIdx = content.indexOf('\n---\n');
 			const frontmatter = closingIdx >= 0
-				? replaceTagsBlock(content.slice(0, closingIdx + 5), tags)
-				: this.buildExternalFrontmatter(displayName, sourcePath, tags);
+				? upsertFrontmatterField(replaceTagsBlock(content.slice(0, closingIdx + 5), tags), 'mail-date', mailDate)
+				: this.buildExternalFrontmatter(displayName, sourcePath, tags, mailDate);
 			await vault.modify(existing, frontmatter + '\n' + body);
 			return true;
 		}
-		await vault.create(notePath, this.buildExternalFrontmatter(displayName, sourcePath, tags) + '\n' + body);
+		await vault.create(notePath, this.buildExternalFrontmatter(displayName, sourcePath, tags, mailDate) + '\n' + body);
 		return false;
 	}
 
@@ -1209,9 +1233,11 @@ export default class FileDropPlugin extends Plugin {
 			let body: string;
 			let attachmentHadError = false;
 			let attachmentHadWarning = false;
+			let mailDate: string | null = null;
 
 			if (isMsgFile) {
 				const msgResult = await runMsgConversion(absPath, this.settings.pythonCommand, gateway, onPhase, onProgress);
+				mailDate = msgResult.date;
 				const parts: string[] = [msgResult.body];
 				for (const att of msgResult.attachments) {
 					if (!att.markdown) continue;
@@ -1238,7 +1264,7 @@ export default class FileDropPlugin extends Plugin {
 			const tagResult = await suggestTags(body, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
-			const noteExisted = await this.writeExternalNote(notePath, baseName, absPath, mergedTags, body);
+			const noteExisted = await this.writeExternalNote(notePath, baseName, absPath, mergedTags, body, mailDate);
 
 			entry.tags = [...mergedTags];
 			entry.sourceSignature = signature;
@@ -1323,7 +1349,7 @@ export default class FileDropPlugin extends Plugin {
 			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
-			const noteExisted = await this.writeExternalNote(notePath, baseName, absDir, mergedTags, combinedBody);
+			const noteExisted = await this.writeExternalNote(notePath, baseName, absDir, mergedTags, combinedBody, converted.latestMailDate);
 
 			entry.tags = [...mergedTags];
 			entry.sourceSignature = signature;

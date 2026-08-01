@@ -138,3 +138,22 @@ export function replaceTagsBlock(content: string, tags: string[]): string {
 		`tags: ${JSON.stringify(tags)}`
 	);
 }
+
+// Set a single scalar frontmatter field, replacing an existing `key: ...` line
+// in place or inserting one just before the closing `---` fence. `content`
+// must be the frontmatter block only, ending in `\n---\n` — the exact slice
+// callers already pass to replaceTagsBlock (content.slice(0, closingIdx + 5)).
+// The returned string keeps that same trailing `\n---\n` shape either way. A
+// null value removes the field (if present) rather than writing `key: null`.
+export function upsertFrontmatterField(content: string, key: string, value: string | null): string {
+	const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+	const lineRe = new RegExp(`^${escapedKey}:[^\\n]*\\n`, 'm');
+	if (value === null) {
+		return content.replace(lineRe, '');
+	}
+	const line = `${key}: ${JSON.stringify(value)}\n`;
+	if (lineRe.test(content)) {
+		return content.replace(lineRe, line);
+	}
+	return content.replace(/\n---\n$/, `\n${line}---\n`);
+}

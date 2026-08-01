@@ -224,6 +224,70 @@ def test_convert_msg_writes_attachment_to_temp_file(tmp_path):
     shutil.rmtree(os.path.dirname(a["temp_path"]), ignore_errors=True)
 
 
+def test_convert_msg_extracts_datetime_date(tmp_path):
+    import datetime
+
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    dt = datetime.datetime(2026, 3, 5, 14, 30, tzinfo=datetime.timezone.utc)
+    fake_extract_msg = types.SimpleNamespace(
+        Message=lambda path: types.SimpleNamespace(attachments=[], date=dt)
+    )
+
+    with patch.object(filedrop_msg, "MarkItDown") as markitdown, \
+            patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        markitdown.return_value.convert.return_value.text_content = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})
+
+    assert result["date"] == dt.isoformat()
+
+
+def test_convert_msg_extracts_string_date(tmp_path):
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    fake_extract_msg = types.SimpleNamespace(
+        Message=lambda path: types.SimpleNamespace(attachments=[], date="Wed, 5 Mar 2026 14:30:00 +0000")
+    )
+
+    with patch.object(filedrop_msg, "MarkItDown") as markitdown, \
+            patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        markitdown.return_value.convert.return_value.text_content = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})
+
+    assert result["date"] == "Wed, 5 Mar 2026 14:30:00 +0000"
+
+
+def test_convert_msg_no_date_attribute(tmp_path):
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    fake_extract_msg = types.SimpleNamespace(
+        Message=lambda path: types.SimpleNamespace(attachments=[])
+    )
+
+    with patch.object(filedrop_msg, "MarkItDown") as markitdown, \
+            patch.dict(sys.modules, {"extract_msg": fake_extract_msg}):
+        markitdown.return_value.convert.return_value.text_content = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})
+
+    assert result["date"] is None
+
+
+def test_convert_msg_date_none_when_extract_msg_missing(tmp_path):
+    msg_path = tmp_path / "mail.msg"
+    msg_path.write_bytes(b"not a real msg, but a regular file")
+
+    with patch.object(filedrop_msg, "MarkItDown") as markitdown, \
+            patch.dict(sys.modules, {"extract_msg": None}):
+        markitdown.return_value.convert.return_value.text_content = "# body"
+        result = filedrop_msg.convert_msg(str(msg_path), {})
+
+    assert result["date"] is None
+    assert result["warning"] is not None
+
+
 def test_convert_msg_skips_pptx_attachment_conversion(tmp_path):
     """A .pptx attachment is left unconverted (empty markdown) so the TS side can
     run the structured PPTX path — but its bytes are still written to temp_path."""
