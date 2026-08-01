@@ -1,5 +1,13 @@
 # Release Notes
 
+## 0.6.5 — Extract mail date from .msg files into frontmatter
+
+### Changes
+
+- Read the email's sent/received date from .msg metadata (via extract-msg) and write it to a new `mail-date` frontmatter field
+- For `.group` notes bundling multiple .msg files, use the most recent member's date
+- Apply to every .msg flow: initial drop, rerun, and external import/re-scan
+
 ## 0.6.4 — Expose all current-note API tools with per-tool toggles
 
 ### Changes
