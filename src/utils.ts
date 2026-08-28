@@ -72,6 +72,15 @@ export function pastedBaseName(): string {
 	return `pasted-${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
+// Extract the local-calendar date from a mail date string (ISO-8601 or other format).
+// Returns YYYY-MM-DD, or null if unparseable.
+export function mailDatePrefix(mailDate: string): string | null {
+	const d = new Date(mailDate);
+	if (isNaN(d.getTime())) return null;
+	const p = (n: number) => String(n).padStart(2, '0');
+	return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 // Map a clipboard blob MIME type to a file extension (no dot).
 export function extFromMime(mime: string): string {
 	const m = (mime || '').toLowerCase().split(';')[0].trim();

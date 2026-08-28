@@ -20,7 +20,7 @@ import {
 	suggestTags,
 } from './src/settings';
 import { ConvertPhase, MsgAttachment, OnPhase, OnProgress, convertPptx, runMarkitdown, runMsgConversion } from './src/convert';
-import { dedupeName, getMonthSlug, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename, upsertFrontmatterField } from './src/utils';
+import { dedupeName, getMonthSlug, mailDatePrefix, mapWithConcurrency, noteNameFromFile, replaceTagsBlock, rewriteImageLinks, sanitizeFilename, upsertFrontmatterField } from './src/utils';
 import { FileDropView } from './src/view';
 import { FileDropSettingTab } from './src/settings-tab';
 import { FileDropApi, NoteTools, buildFileDropApi } from './src/note-tools';
@@ -620,6 +620,27 @@ export default class FileDropPlugin extends Plugin {
 				}
 			}
 
+			// When the group contains mail, prefix the note with the latest mail date
+			// so it sorts chronologically alongside single-.msg imports. Only the
+			// note is renamed — the `.group` directory holding the raw files (and the
+			// already-extracted `_pictures` dir derived from `noteName`) keep their
+			// provisional names, so no link inside the frontmatter needs patching.
+			if (converted.latestMailDate) {
+				const prefix = mailDatePrefix(converted.latestMailDate);
+				if (prefix && !noteName.startsWith(prefix)) {
+					const baseName = `${prefix} ${noteName}`;
+					let candidatePath = normalizePath(`${subfolderPath}/${baseName}.md`);
+					let idx = 1;
+					while (await vault.adapter.exists(candidatePath)) {
+						idx++;
+						candidatePath = normalizePath(`${subfolderPath}/${dedupeName(baseName, idx)}.md`);
+					}
+					notePath = candidatePath;
+					entry.notePath = notePath;
+					this.getActiveView()?.renderFileList();
+				}
+			}
+
 			const tagResult = await suggestTags(combinedBody, gateway, parsePreferredTags(this.settings.preferredTags), undefined, () => this.saveSettings());
 			const mergedTags = Array.from(new Set([...this.settings.defaultTags, ...(tagResult.ok ? tagResult.value : [])]));
 
@@ -810,6 +831,27 @@ export default class FileDropPlugin extends Plugin {
 			}
 
 			if (this.cancelledConversions.delete(notePath)) return;
+
+			// A mail's own sent/received date (from the .msg metadata, not its body)
+			// makes the note sort chronologically in the folder, so prefix it onto
+			// the note name. Only the note is renamed — the raw .msg keeps the name
+			// it was dropped with. Falls back silently to the original-name-derived
+			// path when the .msg carried no parseable date.
+			if (isMsgFile && mailDate) {
+				const prefix = mailDatePrefix(mailDate);
+				if (prefix) {
+					const baseName = `${prefix} ${noteNameFromFile(rawName)}`;
+					let candidatePath = normalizePath(`${subfolderPath}/${baseName}.md`);
+					let idx = 1;
+					while (await vault.adapter.exists(candidatePath)) {
+						idx++;
+						candidatePath = normalizePath(`${subfolderPath}/${dedupeName(baseName, idx)}.md`);
+					}
+					notePath = candidatePath;
+					entry.notePath = notePath;
+					this.getActiveView()?.renderFileList();
+				}
+			}
 
 			// Pasted images/text get a content-derived name now that conversion has
 			// produced something to name them from. Renames the raw file and updates
