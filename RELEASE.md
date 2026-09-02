@@ -1,5 +1,11 @@
 # Release Notes
 
+## 0.6.6 — Add mail date prefixes to imported email note filenames
+
+### Changes
+
+- Prefix imported .msg note filenames with their metadata date (YYYY-MM-DD) so emails sort chronologically; the date sourced from the email's actual sent/received metadata (already recorded in frontmatter)
+
 ## 0.6.5 — Extract mail date from .msg files into frontmatter
 
 ### Changes
